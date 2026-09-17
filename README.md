@@ -462,3 +462,4 @@ NandoXuu
 
 
 --- FUTURAMENTE IREMOS IMPLEMENTAR O COMPILADOR EM .EXE E .APK!
+**o motivo de não termos isso no momento é que o Android vai Pydroid3 não suporta buildozer, gradle e p4a complexos para compilar aplicativos Android. Então, por favor, aguarde por atualizações futuras.
