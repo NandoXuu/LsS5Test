@@ -459,4 +459,6 @@ Consulte o arquivo de licença do repositório para obter os termos completos de
 
 NandoXuu 
 (made with 50% IA WORK)
-LuaStudio — uma engine Lua feita para desenvolvimento diretamente no celular.
+
+
+--- FUTURAMENTE IREMOS IMPLEMENTAR O COMPILADOR EM .EXE E .APK!
