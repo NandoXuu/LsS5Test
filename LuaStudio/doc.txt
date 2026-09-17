@@ -1,0 +1,519 @@
+LUASTUDIO MOBILE - DOCUMENTACAO COMPLETA
+========================================
+IDE Lua (interpretador em Python puro) + Kivy + Pygame, feita para rodar no
+ANDROID via Pydroid 3. Nao usa lupa, nem tkinter, nem OpenGL nativo.
+
+1. INSTALACAO NO PYDROID 3
+--------------------------
+1) Pydroid 3 > menu > Pip > instale: kivy, pillow, pygments (pygame opcional)
+   (pygame/pillow/pygments sao opcionais: som, imagens e realce de sintaxe)
+2) Copie a pasta LuaStudio para /sdcard/ (ou Downloads).
+3) Abra main.py no Pydroid 3 e toque em PLAY (triangulo amarelo).
+4) Toque no botao "Perms" na barra para conceder permissoes do Android.
+
+Desktop: pip install -r requirements.txt && python main.py
+
+2. INTERFACE
+------------
+Barra superior:
+  Play      - executa o codigo do editor e abre o Palco
+  Stop      - para o loop onUpdate e todos os sons
+  Palco/Codigo - alterna entre editor e area de renderizacao
+  Exemplos  - carrega os arquivos da pasta examples/
+  Salvar    - grava script.lua na pasta de armazenamento do app
+  Perms     - solicita permissoes Android (storage, microfone, vibracao)
+  Limpar    - limpa o terminal
+Editor: realce de sintaxe Lua, numeros de linha, INDENT AUTOMATICO,
+barra de simbolos (Tab, <-, --, =, {}, (), "", :, end, fn) para o teclado
+do celular. Terminal na parte inferior mostra print() e erros.
+
+3. A GLOBAL `create`
+--------------------
+Tres formas equivalentes:
+
+  create.button.Hello = { Text = "Ola", Position = {20,20} }   -- atribuicao
+  create.button.Hello { Text = "Ola" }                          -- chamada
+  create.label.ViewportCamera(function(self)                    -- funcao
+      self.Text = "camera ativa"
+      self.Position = vec2(10, 10)
+  end)
+
+Classes 2D : button, label, text, frame, image, slider, toggle, camera2d, light2d
+Classes 3D : part, camera, light
+Outras     : sound
+
+Depois de criado, `create.button.Hello` devolve o proprio objeto, entao
+`create.button.Hello.Text = "novo"` funciona. Prefira app.find("Hello").
+
+4. PROPRIEDADES
+---------------
+Comuns:
+  Name        string  - nome (renomeia o objeto)
+  Visible     bool    - true/false
+  Position    {x,y}/{x,y,z} ou {x=..,y=..} - 2D: pixels, origem no topo-esquerda
+  Size        {w,h} (2D) ou {sx,sy,sz} (3D)
+  Rotation    number  - graus (2D, no centro do objeto)
+  Rotation3   {rx,ry,rz} - graus (3D)
+  Color       "red" | "#2b6cf6" | "#rrggbbaa" | {r,g,b[,a]} (0-1 ou 0-255)
+  TextColor   idem
+  BorderColor idem (desenha contorno)
+  Text        string
+  FontSize    number (padrao 20)
+  Align       "left" | "center" | "right"
+  Radius      number  - cantos arredondados
+  ZIndex      number  - ordem de desenho
+  OnClick     function(self)
+  OnUpdate    function(self, dt, t)
+Slider:  Min, Max, Value, OnChange(self, valor)
+Toggle:  Checked, OnChange(self, bool)
+Image:   Source (caminho relativo ao projeto ou absoluto)
+Sound:   Source, Volume (0-1), Loop
+Part:    Shape = "cube"|"box"|"sphere"|"pyramid"|"cone"|"plane"|"cylinder"
+Camera:  Position, Target, FOV, Rotation3
+Camera2D:Position, Zoom, Rotation, Active, FollowTarget, FollowSmooth,
+         FollowOffset, Bounds   (veja secao 8F)
+Light2D: Type, Direction, Color, Intensity, Range, SpotAngle, CastShadow,
+         Enabled, Layer         (veja secao 8F)
+
+Compatibilidade Camera2D (funcionam em qualquer objeto 2D):
+  IgnoreCamera bool   - true = desenha fixo na tela (HUD), ignora a
+               Camera2D ativa (posicao, zoom e rotacao da camera nao
+               afetam esse objeto). Padrao false.
+  Lit          bool   - true = esse objeto recebe a luz dos create.light2d
+               da cena (preenchimento e imagem/sprite ficam mais escuros
+               ou coloridos conforme as luzes). Padrao false (sem luz,
+               cor normal - retrocompativel).
+  CastShadow   bool   - true = vira ocluidor: bloqueia luzes 2D com
+               CastShadow=true que tentem iluminar objetos atras dele
+               (tambem usado pro sistema de sombra do 3D). Padrao false.
+
+Escala e espelhamento (2D e 3D, cada eixo independente):
+  Scale       {sx,sy,sz} - multiplica o Size por eixo (padrao 1,1,1).
+              Ex.: Scale={2,0.5} estica X e comprime Y ao mesmo tempo,
+              sem mexer no Size nem distorcer o outro eixo.
+  FlipX/FlipY/FlipZ  bool - espelha (inverte) aquele eixo.
+  KeepAspect  bool (so image) - mantem a proporcao original da imagem
+              dentro da caixa Size*Scale, centralizada (sem esticar).
+
+Fisica (2D, opcional por objeto):
+  Physics     bool   - liga o objeto na simulacao (gravidade + colisao)
+  Static      bool   - nao se move, mas outros colidem nele (chao, parede)
+  IsArea      bool   - vira sensor (Area2D): nao empurra ninguem, so avisa
+  Collidable  bool   - participa de colisao solida (padrao true)
+  Velocity    {x,y,z} - px/segundo
+  Gravity     {x,y,z} - sobrescreve a gravidade global so pra esse objeto
+  UseGravity  bool   - padrao true
+  Bounce      number - 0 = nao quica, 1 = quica com energia total
+  Friction    number - amortece a velocidade horizontal aos poucos
+  Mass        number - reservado (nao afeta a resolucao ainda)
+  OnCollide   function(self, outro)         - colisao solida
+  OnAreaEnter function(area, outro)         - so em objetos IsArea=true
+  OnAreaExit  function(area, outro)         - so em objetos IsArea=true
+
+Sprite.Animate (spritesheet, so pra image):
+  Columns, Rows   number  - grade do spritesheet (padrao 1x1 = imagem normal)
+  Frame           number  - quadro atual (0-based); da pra ler/escrever direto
+  FrameSpeed      number  - quadros por segundo; 0 = parado
+  Loop            bool    - padrao true (pra image; pra sound continua false)
+  Playing         bool    - padrao true
+  OnAnimEnd       function(self) - dispara quando Loop=false chega no ultimo quadro
+
+Decoradores de UI (funcionam em qualquer objeto 2D, sem precisar de node
+filho - e so configurar a propriedade no proprio objeto):
+  BorderColor / BorderSize     "Stroke": contorno e espessura.
+                               Aceita tambem StrokeColor/StrokeSize (apelido).
+  GradientColor1/2, GradientDirection (graus)   preenchimento em degrade,
+                               por cima/no lugar de Color.
+  ShadowColor, ShadowBlur, ShadowOffset {x,y}   sombra suave atras do objeto.
+  Padding      number ou {left=,right=,top=,bottom=}  espaco interno usado
+               pelo texto e pelo Sprite interno (padrao 8).
+  SpriteSource, SpriteScale, SpriteAnchor        um icone/imagem dentro do
+               objeto (ex.: Button com icone), independente do Text.
+               SpriteAnchor: "center"|"left"|"right"|"top"|"bottom".
+  SpriteKeepAspect  bool (padrao true) - mantem a proporcao do icone.
+  TransitionEnabled, PressScale, TransitionSpeed  anima a escala do objeto
+               ao tocar/soltar (tipo "click scale"), sem escrever script -
+               ative com obj:EnableTransition{...} ou TransitionEnabled=true.
+
+5. METODOS DOS OBJETOS (use ":")
+--------------------------------
+  obj:Set{ ... }              aplica varias propriedades
+  obj:Destroy()               remove da cena
+  obj:Move(dx, dy, dz)        move relativo
+  obj:MoveTo(x, y, z)         move absoluto
+  obj:Rotate(a)               gira 2D (graus)
+  obj:Rotate(rx, ry, rz)      gira 3D
+  obj:SetText("txt")
+  obj:SetColor("red")
+  obj:Show() / obj:Hide()
+  obj:GetPosition()           -> {x=..,y=..,z=..}
+  obj:Play() / obj:Stop()     somente sound
+
+  -- escala/espelhamento (todos os eixos, independentes) --
+  obj:SetScale(sx, sy, sz)    sx sozinho = uniforme; ex: obj:SetScale(2,0.5)
+  obj:GetScale()              -> {x=..,y=..,z=..}
+  obj:Stretch(sx, sy)         atalho 2D pra SetScale sem mexer no eixo Z
+  obj:Flip(fx, fy, fz)        espelha por eixo (true/false); omita o que
+                               nao quiser mudar, ex: obj:Flip(true)
+
+  -- fisica --
+  obj:EnablePhysics{ Static=false, Bounce=.3, ... }   liga e configura
+  obj:DisablePhysics()
+  obj:MakeArea(true)          vira sensor Area2D (OnAreaEnter/OnAreaExit)
+  obj:SetVelocity(x, y, z)
+  obj:GetVelocity()           -> {x=..,y=..,z=..}
+  obj:ApplyImpulse(x, y, z)   soma a velocidade atual (empurrao/pulo)
+
+  -- spritesheet --
+  obj:GotoFrame(indice)       pula direto pra um quadro (0-based)
+  obj:Pause() / obj:Resume()  pausa/retoma a animacao (so image)
+
+  -- decoradores --
+  obj:EnableTransition{ PressScale=.9, TransitionSpeed=.1 }
+  obj:DisableTransition()
+
+  -- Camera2D (so em objetos create.camera2d) --
+  cam:Follow(alvo, suavizacaoSeg, {x=,y=})   segue um objeto todo frame;
+                               suavizacaoSeg omitido/0 = gruda direto
+  cam:Unfollow()               para de seguir
+  cam:Shake(forca, duracaoSeg) tremor de camera (screen shake), decai
+                               linear ate parar sozinho
+  cam:StopShake()              cancela o tremor na hora
+  cam:SetZoom(z) / cam:GetZoom() / cam:ZoomBy(fator)
+  cam:SetBounds(minX,minY,maxX,maxY)   trava a camera dentro de limites
+                               (qualquer lado pode ficar nil = sem limite)
+  cam:ClearBounds()
+  cam:WorldToScreen(x,y) -> {x=,y=,z=}   ponto do mundo -> tela
+  cam:ScreenToWorld(x,y) -> {x=,y=,z=}   tela -> ponto do mundo
+  (Move/MoveTo/GetPosition/Rotate ja funcionam automaticamente, iguais
+  aos de qualquer outro objeto - Rotation da Camera2D e um numero, graus)
+
+6. GLOBAL `app`
+---------------
+  app.find(nome)        -> objeto ou nil
+  app.destroy(nome)
+  app.clear()
+  app.all("button")     -> tabela de objetos
+  app.count()
+  app.width() / app.height() / app.size()
+  app.time()            -> segundos desde o Play
+  app.background(cor)
+  app.log(...)
+  app.onUpdate(fn)  == onUpdate(fn)   fn(dt, t) ~45 FPS
+  app.onTouch(fn)   == onTouch(fn)    fn(x, y, "down"|"move"|"up")
+  app.vec(x,y,z) / vec2(x,y) / vec3(x,y,z)
+
+6B. GLOBAIS `Vector2` / `Vector3`
+----------------------------------
+  Objetos de verdade em vez de tabela solta - aceitos em qualquer prop
+  vetorial (Position, Size, Scale, Velocity, Target...):
+    local pos = Vector2.new(100, 200)   -- ou Vector2(100, 200)
+    player.Position = pos
+    print(pos.x, pos.y)
+    pos.x = 150                          -- campos dao pra reatribuir
+
+  Metodos (2D e 3D, chame com ":"):
+    v:length() / v:magnitude()   tamanho do vetor
+    v:distance(outro)            distancia ate outro Vector2/Vector3/tabela
+    v:normalize()                -> novo vetor unitario (mesma direcao)
+    v:lerp(outro, t)             -> novo vetor interpolado (t de 0 a 1)
+    v:dot(outro)                 produto escalar
+    v:add(outro) / v:sub(outro)  -> novo vetor (soma/subtracao)
+    v:scale(numero)              -> novo vetor multiplicado
+    v:unpack()                   -> x, y[, z] soltos
+  So em Vector3: v:cross(outro) -> novo Vector3 (produto vetorial)
+  Todo metodo que "cria" vetor (normalize/lerp/add/sub/scale/cross) retorna
+  um Vector2/Vector3 NOVO - o original nao muda.
+
+6C. GLOBAL `input` (mouse/touch mais completo)
+-------------------------------------------------
+  input.mousePosition()          -> {x=..,y=..} posicao atual do
+                                     mouse/dedo (independente de toque)
+  input.isMouseDown(botao)       -> bool; botao = 1/"left", 2/"right",
+                                     3/"middle" (padrao 1)
+  Alem do onTouch(fn) global, cada objeto 2D tambem aceita:
+    obj.OnMouseEnter = function(obj) ... end   -- cursor entrou na area
+    obj.OnMouseExit  = function(obj) ... end   -- cursor saiu da area
+  (funciona com mouse no desktop; no celular dispara ao arrastar o dedo
+  sobre o objeto, ja que nao existe "hover" sem toque num touchscreen)
+
+7. GLOBAL `android` (plugin de permissoes do Pydroid 3)
+-------------------------------------------------------
+  android.isAndroid()                    -> bool
+  android.requestPermission("storage")   -> concedido, tabela
+  android.requestPermissions({"storage","camera","microphone"})
+  android.hasPermission("camera")        -> bool
+  android.vibrate(ms)
+  android.toast("mensagem")
+  android.notify("Titulo", "mensagem")   -> notificacao de verdade na barra
+                                             de status (com titulo, fica ate
+                                             o usuario dispensar)
+  android.storagePath()                  -> /storage/emulated/0/LuaStudio
+  android.info()                         -> tabela com dados do aparelho
+
+  -- bussola --
+  android.compassStart()                 -> liga o sensor magnetico
+  android.compassStop()                  -> desliga o sensor
+  android.compassHeading()               -> graus 0-360 (0=norte) ou nil
+                                             se a bussola estiver desligada
+                                             ou indisponivel. Leia dentro
+                                             de onUpdate/timer.every pra
+                                             atualizar em tempo real.
+
+  -- microfone --
+  android.micStart([caminho])            -> comeca a gravar (pede permissao
+                                             de microfone sozinho); caminho
+                                             opcional, senao usa um padrao
+                                             em android.storagePath()
+  android.micStop()                      -> para a gravacao, retorna o
+                                             caminho do arquivo gravado
+  android.micPlay([caminho])             -> toca a gravacao (por padrao a
+                                             ultima feita com micStart)
+
+  -- camera --
+  android.takePhoto([caminho], function(caminhoFoto) ... end)
+                                          -> abre a camera nativa; quando o
+                                             usuario tira a foto (assincrono),
+                                             chama a funcao com o caminho do
+                                             arquivo salvo (ou nil se
+                                             cancelou/falhou)
+
+  -- camera AO VIVO (frames em tempo real dentro de um create.image) --
+  android.cameraStart([indice])          -> liga a camera (0=traseira,
+                                             1=frontal, depende do aparelho)
+  android.cameraStop()                   -> desliga
+  android.cameraActive()                 -> bool
+  Enquanto ligada, qualquer create.image com Source = "camera" mostra o
+  feed ao vivo (atualiza sozinho a cada frame, ~45 FPS). Se a imagem vier
+  de cabeca pra baixo ou de lado no seu aparelho, ajuste normalmente com
+  as props que ja existem: FlipY = true, Rotation = -90, etc.
+  Exemplo:
+    android.cameraStart()
+    create.image.Preview{ Position = {0,0}, Size = {400,400}, Source = "camera" }
+
+  -- medidor de volume do microfone (altura em tempo real, 0-100) --
+  android.micLevelStart()                -> comeca a escutar (nao grava
+                                             arquivo nenhum, so mede)
+  android.micLevelStop()                 -> para de escutar
+  android.micLevel()                     -> 0-100, leia dentro de onUpdate
+                                             pra fazer uma barra tipo VU-metro
+  Nao use ao mesmo tempo que micStart/micStop (os dois usam o microfone).
+Apelidos aceitos: storage, read_storage, write_storage, media, camera,
+microphone/record_audio, location, vibrate, internet, notifications,
+bluetooth. Tambem aceita o nome completo "android.permission.CAMERA".
+Backends tentados nesta ordem: android.permissions (pyjnius) ->
+androidhelper (plugin do Pydroid 3) -> plyer. No desktop tudo retorna true.
+
+8. GLOBAIS `fs` e `sound`
+-------------------------
+  fs.read(caminho) / fs.write(caminho, texto) / fs.exists(p) / fs.dir()
+  (fs.write pede permissao de armazenamento automaticamente)
+  sound.play("NomeDoSom") / sound.stop("Nome") / sound.stopAll()
+
+8B. GLOBAL `physics`
+--------------------
+  physics.gravity(x, y, z)     define a gravidade global (padrao 0,900,0;
+                                Y cresce pra baixo, igual ao resto do 2D)
+  physics.getGravity()         -> {x=..,y=..,z=..}
+  physics.raycast(x1,y1,x2,y2) atira um raio 2D contra objetos com Physics
+                                ou IsArea; retorna objeto, {x=..,y=..} do
+                                impacto, ou nil se nao acertou nada
+  Simulacao simples (sem torque/rotacao): gravidade + colisao AABB com
+  separacao e quique (Bounce) + sensores Area2D. Roda automaticamente a
+  cada frame enquanto o Play estiver ativo, pra qualquer objeto com
+  Physics=true (via create.frame.X{Physics=true,...} ou obj:EnablePhysics{}).
+
+8C. GLOBAIS `tween`, `timer`, `Random`, `JSON`, `SaveData`
+-----------------------------------------------------------
+  tween.to(obj, {Propriedade=valorFinal, ...}, duracao, easing, aoTerminar)
+        anima qualquer propriedade numerica ou vetorial (Position, Size,
+        Scale, Rotation, Color...) suavemente ate o valor final.
+        easing: "linear" | "ease_in" | "ease_out" | "ease_in_out" |
+        "ease_out_back" (padrao "ease_out"). aoTerminar: function(obj) opcional.
+  tween.cancel(obj, propriedade)   cancela tweens em andamento (propriedade
+        opcional; sem ela cancela tudo desse objeto)
+
+  timer.after(segundos, function() ... end)  -> handle
+        chama a funcao uma vez, depois do tempo dado
+  timer.every(segundos, function() ... end)  -> handle
+        chama repetidamente a cada intervalo
+  timer.cancel(handle)             cancela um timer.after/every pendente
+
+  Random.int(a, b)          inteiro entre a e b (inclusive)
+  Random.float(a, b)        numero com casas decimais entre a e b
+  Random.bool(chance)       true/false (chance de 0 a 1, padrao 0.5)
+  Random.pick(tabela)       escolhe um item aleatorio da lista
+  Random.seed(n)            fixa a semente (matematica igual toda vez)
+
+  JSON.encode(tabela) -> string   |   JSON.decode(string) -> tabela
+
+  SaveData.set(chave, valor)      salva (persiste entre execucoes, em disco)
+  SaveData.get(chave, padrao)     le (retorna `padrao` se nao existir)
+  SaveData.has(chave) -> bool
+  SaveData.remove(chave)
+  SaveData.clear()                apaga tudo
+
+8D. GLOBAL `Scenes` (trocar de menu/fase sem gambiarra)
+--------------------------------------------------------
+  Scenes.register(nome, function() ... end)   cadastra uma cena: a funcao
+        e o "construtor" - cria os objetos daquela tela quando ela carrega
+  Scenes.load(nome)                carrega: destroi TUDO da cena atual
+        (objetos, particulas, tweens, timers, fisica, onUpdate/onTouch
+        daquela cena) e roda o construtor da nova - sem perder variaveis
+        globais nem outras cenas ja registradas
+  Scenes.load(nome, segundos)      igual, mas com fade preto suave
+  Scenes.current()                 -> nome da cena atual
+  Scenes.has(nome)                 -> bool
+
+8E. GLOBAL `create.particles` (emissor de particulas)
+------------------------------------------------------
+  create.particles.Nome{ Rate=30, Emitting=true, Direction=-90,
+                         SpreadAngle=30, Speed={min,max}, Life={min,max},
+                         SizeStart=10, SizeEnd=0, Color1="orange",
+                         Color2=nil, EmitBox={0,0,0}, Gravity=nil,
+                         MaxParticles=200 }
+  As particulas em si NAO sao objetos Lua (nao aparecem em app.all()) -
+  ficam guardadas dentro do proprio emissor e sao desenhadas direto,
+  pra nao pesar criando centenas de instancias por segundo.
+  Direction em graus, -90 = "pra cima" (Y cresce pra baixo, como o resto
+  do 2D). Color2 e opcional - se nao informado, vira a cor de Color1 com
+  alfa 0 (some suavemente). Gravity nao informado usa a gravidade global
+  de `physics`.
+  obj:Burst(quantidade)     dispara varias particulas de uma vez (explosao)
+  obj:StartEmit() / obj:StopEmit()   liga/desliga emissao continua
+
+8F. GLOBAIS `camera2d` e `light2d` (camera e luz pro 2D, igual ao 3D)
+----------------------------------------------------------------------
+  Camera2D (create.camera2d.Nome{...}) - a primeira criada vira a camera
+  ativa automaticamente, igual create.camera no 3D. Enquanto NAO existir
+  nenhuma create.camera2d na cena, o 2D desenha exatamente como antes
+  (retrocompativel: nada muda pra projetos antigos).
+
+    create.camera2d.Main{ Position={0,0}, Zoom=1.0, Rotation=0 }
+
+  Depois de criada, todo objeto 2D que NAO tiver IgnoreCamera=true passa
+  a se mover/escalar/girar junto com a camera (Position=centro da tela,
+  Zoom=amplia/reduz, Rotation=graus). Objetos com IgnoreCamera=true (HUD:
+  botoes de menu, joystick, textos de pontuacao...) ficam sempre fixos na
+  tela, por cima do resto, do jeito que sempre funcionou.
+
+  Metodos: veja a secao 5 (obj:Follow, :Shake, :SetZoom, :SetBounds,
+  :WorldToScreen, :ScreenToWorld, alem de :MoveTo/:Move/:Rotate normais).
+
+  Globais:
+    camera2d.current()              -> a Camera2D ativa (ou nil)
+    camera2d.setActive(obj)         troca qual camera2d esta ativa (pra
+                                     jogos com mais de uma camera/tela)
+    camera2d.worldToScreen(x,y)     atalho pra cam:WorldToScreen na ativa
+    camera2d.screenToWorld(x,y)     atalho pra cam:ScreenToWorld na ativa
+
+  Exemplo (camera seguindo o jogador, com limite de mapa e tremor no hit):
+    create.camera2d.Main{ Zoom = 1.2 }
+    camera2d.current():Follow(app.find("Jogador"), 0.15)
+    camera2d.current():SetBounds(0, 0, 2000, 1200)
+    -- ao tomar dano:
+    camera2d.current():Shake(14, 0.25)
+
+  Light2D (create.light2d.Nome{...}) - luzes que iluminam os objetos 2D
+  marcados com Lit=true. Tipos: "point" (raio Range, com falloff), "spot"
+  (cone de SpotAngle graus na direcao Direction) e "directional" (ilumina
+  igual em toda a cena, sem posicao). Enquanto nao houver create.light2d
+  na cena, objetos Lit=true continuam com a cor normal (sem escurecer).
+
+    create.light2d.Lanterna{ Type="point", Position={200,150},
+                             Color="orange", Intensity=1.4, Range=260,
+                             CastShadow=true }
+    create.frame.Parede{ Position={400,150}, Size={40,300},
+                         Color="gray", CastShadow=true, Lit=true }
+    create.image.Chao{ Source="grama.png", Lit=true }
+
+    light2d.ambient(cor, intensidade)   luz ambiente da cena inteira -
+         intensidade 1.0 (padrao) = nao escurece nada; use algo como
+         light2d.ambient("#101018", 0.25) pra escurecer o cenario e
+         deixar as luzes se destacarem, tipo jogo de terror/furtividade.
+    light2d.setMaxLights(n)             limite de luzes somadas por
+         objeto (padrao 8) - light filtering, igual ao 3D.
+
+  Sombras 2D: uma create.light2d com CastShadow=true e bloqueada por
+  qualquer objeto 2D com CastShadow=true entre ela e o ponto iluminado
+  (oclusao por retangulo, nao e sombra com formato exato do sprite).
+
+9. LUA SUPORTADO
+----------------
+Interpretador proprio (Python puro): local/global, tabelas, metatables
+(__index/__newindex/__call), if/elseif/else, while, repeat, for numerico e
+generico, funcoes (inclusive metodos com ":"), varargs, break/return,
+operadores aritmeticos, relacionais, logicos, .. e #, comentarios.
+Bibliotecas: print, type, tostring, tonumber, error, assert, pcall, pairs,
+ipairs, next, select, unpack, rawget/rawset, setmetatable/getmetatable,
+math.*, string.* (len, sub, upper, lower, rep, reverse, byte, char, format,
+find, gsub simples, split), table.* (insert, remove, concat, sort, unpack),
+os.time, os.clock, os.date.
+
+10. EXEMPLO COMPLETO
+--------------------
+  android.requestPermission("storage")
+  app.background("#101425")
+
+  create.label.Titulo = { Text="Ola!", Position={20,20}, Size={280,44},
+                          FontSize=26, TextColor="cyan" }
+
+  create.button.Play = {
+    Text="Girar", Position={20,90}, Size={220,60}, Color="#2b6cf6", Radius=16,
+    OnClick = function(self) girando = not girando; android.vibrate(40) end
+  }
+
+  create.camera.Main = { Position={0,2,-7}, Target={0,0,0} }
+  create.part.Cubo   = { Shape="cube", Size={1,1,1}, Color="orange" }
+
+  onUpdate(function(dt, t)
+    if girando then app.find("Cubo"):Rotate(60*dt, 90*dt, 0) end
+  end)
+
+11. ESTRUTURA DO PROJETO
+------------------------
+  main.py                 ponto de entrada (abra no Pydroid 3)
+  doc.txt                 esta documentacao
+  requirements.txt
+  examples/               01_ui_2d.lua, 02_cena_3d.lua, 03_android.lua
+  luastudio/app.py        IDE Kivy (toolbar, editor, palco, terminal)
+  luastudio/editor.py     editor com realce e indent automatico
+  luastudio/stage.py      renderizador 2D/3D em canvas Kivy
+  luastudio/render3d.py   motor 3D matematico (projecao + painter's algorithm)
+  luastudio/lighting.py   luzes 3D (Directional/Point/Spot) + sombras
+  luastudio/lighting2d.py luzes 2D (Directional/Point/Spot) + sombras
+  luastudio/runtime.py    ponte Lua <-> API
+  luastudio/api.py        create, Instance, Scene, cores e vetores
+  luastudio/audio.py      som via Pygame
+  luastudio/permissions.py permissoes Android / Pydroid 3
+  luastudio/lua/          lexer, parser e interpretador Lua em Python puro
+
+12. PROBLEMAS COMUNS
+--------------------
+- "No module named kivy": instale kivy pelo Pip do Pydroid 3.
+- Sem som: instale pygame; em emulador o mixer pode nao abrir (o app avisa
+  no terminal e continua funcionando).
+- Sem realce de cores: instale pygments (o editor cai para texto simples).
+- Imagem nao aparece: use caminho relativo a pasta do projeto e conceda a
+  permissao de armazenamento.
+- Tela 3D vazia: crie uma camera (create.camera.Main) e verifique se o
+  objeto esta a frente dela (Target).
+- Objeto 2D "sumiu" ou nao mexe mais: se voce criou uma create.camera2d,
+  todo objeto sem IgnoreCamera=true passa a seguir a posicao/zoom dela -
+  confira a Position da camera2d, ou marque IgnoreCamera=true no objeto
+  se ele deveria ficar fixo (HUD).
+- create.light2d nao ilumina nada: o objeto precisa ter Lit=true (luz 2D
+  e opt-in, por padrao nenhum objeto e afetado).
+
+
+--------------------------------------------------------------------------
+SOLUCAO DE PROBLEMAS (Pydroid 3)
+--------------------------------------------------------------------------
+* "Unable to find any valuable Window provider" / "Window.clearcolor:
+  'NoneType' object has no attribute" -> pygame foi importado antes do Kivy.
+  Execute o main.py deste projeto (ele nunca importa pygame no inicio) e nao
+  rode o script dentro de outro programa que use pygame na mesma sessao.
+* "[ERROR] [Input] MTDev is not supported / libmtdev.so.1 not found" ->
+  mensagem informativa do Kivy no Android, pode ignorar.
+* Sem som -> instale pygame pelo Pip; se o mixer nao abrir, o app avisa no
+  console e continua funcionando normalmente.
