@@ -137,3 +137,7 @@ renderiza exatamente como antes (nenhum objeto e afetado por padrao).
 Tudo é retrocompatível: cenas antigas sem luzes continuam com a luz
 direcional fixa de sempre, e chamadas antigas de `render3d.project_scene`,
 `audio.play/stop/stopAll` continuam funcionando sem mudar nada.
+
+
+MADE by Humans WITH AI
+(CHATGPT (CodeX) & CLAUDE CODE)
