@@ -21,7 +21,7 @@ class Light2D(object):
 
     def __init__(self, type="point", position=(0, 0), direction=0.0, color=(1, 1, 1),
                  intensity=1.0, range=220.0, spot_angle=45.0, casts_shadow=False,
-                 layer=0, enabled=True):
+                 layer=0, enabled=True, height=100.0):
         self.type = str(type or "point").lower()
         self.position = (float(position[0]), float(position[1]))
         self.direction = float(direction)
@@ -32,6 +32,7 @@ class Light2D(object):
         self.casts_shadow = bool(casts_shadow)
         self.layer = layer
         self.enabled = bool(enabled)
+        self.height = float(height)
 
     def contribution(self, point):
         """Retorna (atten, color*intensity) pra um ponto do palco, ou None

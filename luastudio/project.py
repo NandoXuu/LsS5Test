@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 """Sistema de projetos do LuaStudio.
 
-Um projeto e uma pasta dentro de `LuaStudio/Projects/<nome>/` contendo:
+Um projeto e uma pasta com o MESMO NOME do projeto, direto em
+`Documents/` (ex.: `Documents/my_game/`), contendo:
 
-  - project.json   manifesto (nome, script de entrada, lista de scripts)
+  - project.json   manifesto (nome, icone, script de entrada, scripts)
   - scripts/*.lua  um ou mais arquivos de script/modulo do projeto
-  - assets/*       opcional: imagens, sons etc. usados pelo projeto
+  - assets/*       imagens, sons etc. usados pelo projeto
+  - icon.png       (opcional) imagem de icone escolhida na criacao
+
+Projetos criados por versoes antigas (em `LuaStudio/Projects/`) continuam
+aparecendo na lista e abrindo normalmente.
 
 Todos os scripts de um projeto rodam no MESMO runtime Lua (mesmas
 variaveis globais, mesma cena), entao podem se comunicar entre si e
@@ -30,12 +35,46 @@ import shutil
 import zipfile
 
 from . import permissions as perms
+from . import screenfit
 
 PROJECT_FILE = "project.json"
 SCRIPTS_DIR = "scripts"
 ASSETS_DIR = "assets"
 LSP_EXT = ".Lsp"
 ENGINE_VERSION = 1
+
+# ---- icones de projeto ------------------------------------------------
+# O icone de um projeto e um dict no manifesto:
+#   {"glyph": "@initial" | "🚀", "color": "#RRGGBB"}   (bloco colorido)
+#   {"image": "icon.png", "color": "#RRGGBB"}          (imagem na pasta)
+# "@initial" = usa a inicial do nome do projeto (sempre renderiza).
+ICON_COLORS = ["#5B6EE1", "#2FA89A", "#4FA36B", "#D69A3C",
+               "#D9743F", "#CC4F5C", "#8A5CD0", "#6B7280"]
+ICON_GLYPHS = ["🎮", "🚀", "👾", "🐉", "🧙", "🧩", "🌌", "🔥", "🐱", "🐸",
+               "🎯", "🏰", "🤖", "🎲", "💎", "🍄", "🌈", "👻", "🦊", "🚗",
+               "🦖", "🐧", "🛸"]
+ICON_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def default_icon():
+    return {"glyph": "@initial", "color": ICON_COLORS[0]}
+
+
+def normalize_icon(icon):
+    """Garante um dict de icone valido (e seguro: `image` vira so o nome
+    do arquivo, sem caminho)."""
+    out = default_icon()
+    if isinstance(icon, dict):
+        color = icon.get("color")
+        if isinstance(color, str) and color.startswith("#") and len(color) in (4, 7):
+            out["color"] = color
+        glyph = icon.get("glyph")
+        if isinstance(glyph, str) and glyph:
+            out["glyph"] = glyph if glyph == "@initial" else glyph[:4]
+        image = icon.get("image")
+        if isinstance(image, str) and image.strip():
+            out["image"] = os.path.basename(image.replace("\\", "/"))
+    return out
 
 DEFAULT_MAIN = """-- main.lua (script de entrada do projeto)
 -- Um projeto pode ter varios scripts que se comunicam entre si.
@@ -99,15 +138,58 @@ def _safe_script_name(name):
     return out or "script.lua"
 
 
+def documents_dir():
+    """Pasta `Documents` do dispositivo (Android ou desktop). E aqui que
+    cada projeto ganha a sua pasta: Documents/<nome_do_projeto>/."""
+    candidates = [
+        "/storage/emulated/0/Documents",
+        os.path.join(os.environ.get("EXTERNAL_STORAGE") or "", "Documents"),
+        "/sdcard/Documents",
+        os.path.join(os.path.expanduser("~"), "Documents"),
+    ]
+    for c in candidates:
+        if not c or c == "Documents":
+            continue
+        check = c if os.path.isdir(c) else os.path.dirname(c)
+        if check and os.path.isdir(check) and os.access(check, os.W_OK):
+            try:
+                if not os.path.isdir(c):
+                    os.makedirs(c)
+                return c
+            except Exception:
+                continue
+    # ultimo recurso: dentro da pasta de trabalho do LuaStudio
+    return os.path.join(perms.storage_dir(), "Projects")
+
+
 def projects_root():
-    """Pasta onde ficam todos os projetos: LuaStudio/Projects."""
-    root = os.path.join(perms.storage_dir(), "Projects")
+    """Pasta onde ficam todos os projetos: Documents/."""
+    root = documents_dir()
     try:
         if not os.path.isdir(root):
             os.makedirs(root)
     except Exception:
         pass
     return root
+
+
+def legacy_root():
+    """Pasta usada pelas versoes antigas (LuaStudio/Projects). So lida -
+    os projetos que estiverem la continuam aparecendo na lista."""
+    return os.path.join(perms.storage_dir(), "Projects")
+
+
+def folder_name(name):
+    """Nome da pasta que um projeto com esse nome vai ter."""
+    return _safe_name(name)
+
+
+def project_folder_path(name):
+    return os.path.join(projects_root(), folder_name(name))
+
+
+def project_exists(name):
+    return os.path.exists(project_folder_path(name))
 
 
 # ------------------------------------------------------------------ Project
@@ -120,6 +202,13 @@ class Project(object):
         self.scripts = {}             # nome_do_arquivo.lua -> codigo fonte
         self.entry = "main.lua"
         self.created = time.time()
+        # tela: fullscreen, proporcao (16:9 etc.), orientacao, modo de
+        # encaixe - ver `screenfit.py`. Configurado na criacao do projeto
+        # (ou depois, no botao "Tela" da IDE) e usado pelo LuaStudio
+        # Player / export pra rodar o jogo sem esticar a imagem.
+        self.screen = screenfit.default_screen_config()
+        self.icon = default_icon()
+        self.apk = {}
 
     def order(self):
         """Nomes dos scripts, com o de entrada sempre primeiro."""
@@ -164,45 +253,117 @@ class Project(object):
             "scripts": sorted(self.scripts.keys()),
             "created": self.created,
             "modified": time.time(),
+            "screen": dict(self.screen or screenfit.default_screen_config()),
+            "icon": normalize_icon(self.icon),
+            "apk": dict(self.apk or {}),
         }
 
 
 # ---------------------------------------------------------------- listagem
-def list_projects():
-    """[(pasta, caminho_completo, nome_exibido)] de todo projeto salvo."""
-    root = projects_root()
+def _scan_root(root, legacy):
     out = []
-    if os.path.isdir(root):
-        for entry in sorted(os.listdir(root)):
-            path = os.path.join(root, entry)
-            manifest_path = os.path.join(path, PROJECT_FILE)
-            if os.path.isdir(path) and os.path.isfile(manifest_path):
-                display = entry
-                try:
-                    with open(manifest_path, "r", encoding="utf-8") as fh:
-                        display = json.load(fh).get("name", entry)
-                except Exception:
-                    pass
-                out.append((entry, path, display))
+    if not os.path.isdir(root):
+        return out
+    try:
+        names = sorted(os.listdir(root), key=lambda n: n.lower())
+    except OSError:
+        return out
+    for entry in names:
+        path = os.path.join(root, entry)
+        manifest_path = os.path.join(path, PROJECT_FILE)
+        try:
+            ok = os.path.isdir(path) and os.path.isfile(manifest_path)
+        except OSError:
+            ok = False
+        if not ok:
+            continue
+        data = {}
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+        except Exception:
+            data = {}
+        try:
+            mtime = os.path.getmtime(manifest_path)
+        except OSError:
+            mtime = 0
+        out.append({
+            "folder": entry,
+            "path": path,
+            "name": data.get("name") or entry,
+            "icon": normalize_icon(data.get("icon")),
+            "scripts": len(data.get("scripts") or []),
+            "modified": data.get("modified") or mtime,
+            "legacy": legacy,
+        })
     return out
 
 
+def list_project_entries():
+    """Todos os projetos salvos (Documents/ + pasta antiga), do mais
+    recente pro mais antigo, como dicts: folder, path, name, icon,
+    scripts, modified, legacy."""
+    entries = _scan_root(projects_root(), False)
+    old = legacy_root()
+    if os.path.normpath(old) != os.path.normpath(projects_root()):
+        entries += _scan_root(old, True)
+    entries.sort(key=lambda e: e["modified"] or 0, reverse=True)
+    return entries
+
+
+def list_projects():
+    """[(pasta, caminho_completo, nome_exibido)] de todo projeto salvo."""
+    return [(e["folder"], e["path"], e["name"]) for e in list_project_entries()]
+
+
 # ------------------------------------------------------------------- criar
-def create_project(name):
-    """Cria um projeto NOVO em memoria (com um exemplo de 2 scripts que se
-    comunicam). So vira pasta de verdade quando `save_project` for chamado."""
-    proj = Project(name=name or "Novo Projeto")
-    folder = _safe_name(proj.name)
+def create_project(name, icon=None, image_src=None, save=True, unique=False):
+    """Cria um projeto NOVO. Por padrao ja cria a pasta de verdade em
+    `Documents/<nome>/` (com project.json, scripts/ e assets/).
+
+    - icon: dict de icone (ver `normalize_icon`); `image_src` = caminho de
+      uma imagem qualquer do dispositivo, copiada como `icon.<ext>`.
+    - Se ja existir uma pasta com esse nome: levanta FileExistsError
+      (ou, com `unique=True`, usa `<nome>_2`, `<nome>_3`...).
+    """
+    display = (name or "").strip() or "Novo Projeto"
+    folder = _safe_name(display)
     root = projects_root()
-    dest, i = os.path.join(root, folder), 1
-    while os.path.isdir(dest):
-        i += 1
-        dest = os.path.join(root, "%s_%d" % (folder, i))
-    proj.path = dest
+    dest = os.path.join(root, folder)
+    if os.path.exists(dest):
+        if not unique:
+            raise FileExistsError(dest)
+        i = 1
+        while os.path.exists(dest):
+            i += 1
+            dest = os.path.join(root, "%s_%d" % (folder, i))
+    proj = Project(name=display, path=dest)
+    proj.icon = normalize_icon(icon)
     proj.add_script("main.lua", DEFAULT_MAIN)
     proj.add_script("ajudante.lua", DEFAULT_MODULE)
     proj.entry = "main.lua"
+    if save:
+        save_project(proj)
+        if image_src:
+            set_icon_image(proj, image_src)
     return proj
+
+
+def set_icon_image(proj, src_path):
+    """Copia uma imagem pra `<projeto>/icon.<ext>` e usa como icone."""
+    if not proj.path or not src_path or not os.path.isfile(src_path):
+        return False
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext not in ICON_IMAGE_EXTS:
+        return False
+    fname = "icon" + ext
+    try:
+        shutil.copyfile(src_path, os.path.join(proj.path, fname))
+    except Exception:
+        return False
+    proj.icon = dict(normalize_icon(proj.icon), image=fname)
+    save_project(proj)
+    return True
 
 
 # ------------------------------------------------------------------- salvar
@@ -214,6 +375,9 @@ def save_project(proj):
     scripts_dir = os.path.join(proj.path, SCRIPTS_DIR)
     if not os.path.isdir(scripts_dir):
         os.makedirs(scripts_dir)
+    assets_path = os.path.join(proj.path, ASSETS_DIR)
+    if not os.path.isdir(assets_path):
+        os.makedirs(assets_path)
     # remove do disco scripts que nao existem mais no projeto em memoria
     for fn in os.listdir(scripts_dir):
         if fn.lower().endswith(".lua") and fn not in proj.scripts:
@@ -237,6 +401,12 @@ def load_project(path):
     proj = Project(name=data.get("name") or os.path.basename(path), path=path)
     proj.entry = data.get("entry", "main.lua")
     proj.created = data.get("created", time.time())
+    screen_cfg = screenfit.default_screen_config()
+    screen_cfg.update(data.get("screen") or {})
+    proj.screen = screen_cfg
+    proj.icon = normalize_icon(data.get("icon"))
+    apk_cfg = data.get("apk")
+    proj.apk = dict(apk_cfg) if isinstance(apk_cfg, dict) else {}
     scripts_dir = os.path.join(path, SCRIPTS_DIR)
     names = list(data.get("scripts") or [])
     if os.path.isdir(scripts_dir):
@@ -256,7 +426,13 @@ def load_project(path):
 
 
 def delete_project(path):
+    """Apaga a pasta inteira do projeto. Por seguranca, so apaga se a
+    pasta tiver um project.json (nunca `Documents/` ou outra pasta
+    qualquer). Devolve True se apagou."""
+    if not path or not os.path.isfile(os.path.join(path, PROJECT_FILE)):
+        return False
     shutil.rmtree(path, ignore_errors=True)
+    return not os.path.exists(path)
 
 
 # ---------------------------------------------------------- exportar .Lsp
@@ -288,6 +464,11 @@ def export_lsp(proj, dest_path=None):
         zf.writestr(PROJECT_FILE, manifest_json)
         for name, code in proj.scripts.items():
             zf.writestr(SCRIPTS_DIR + "/" + name, code)
+        icon_file = normalize_icon(proj.icon).get("image")
+        if icon_file and proj.path:
+            icon_full = os.path.join(proj.path, icon_file)
+            if os.path.isfile(icon_full):
+                zf.write(icon_full, icon_file)
         assets_dir = os.path.join(proj.path, ASSETS_DIR) if proj.path else None
         if assets_dir and os.path.isdir(assets_dir):
             for root, _dirs, files in os.walk(assets_dir):
@@ -320,6 +501,8 @@ def read_lsp(lsp_path):
     if not manifest:
         manifest = {"name": os.path.splitext(os.path.basename(lsp_path))[0],
                     "entry": "main.lua", "scripts": sorted(scripts.keys())}
+    if not manifest.get("screen"):
+        manifest["screen"] = screenfit.default_screen_config()
     if manifest.get("entry") not in scripts and scripts:
         manifest["entry"] = sorted(scripts.keys())[0]
     return manifest, scripts
@@ -348,7 +531,9 @@ def import_lsp_as_project(lsp_path):
     """Importa um `.Lsp` pra dentro de Projects/, pra dar pra editar de
     volta no LuaStudio (IDE). Devolve o Project ja salvo em disco."""
     manifest, scripts = read_lsp(lsp_path)
-    proj = create_project(manifest.get("name") or "Projeto importado")
+    proj = create_project(manifest.get("name") or "Projeto importado",
+                          save=False, unique=True)
+    proj.icon = normalize_icon(manifest.get("icon"))
     # renomeia cada script pelo mesmo sanitizador de add_script() - nomes
     # de dentro de um .Lsp nao sao confiaveis (podem ter vindo de um zip
     # editado a mao), entao nunca viram nome de arquivo direto no disco.
@@ -366,6 +551,15 @@ def import_lsp_as_project(lsp_path):
         extract_lsp_assets(lsp_path, proj.path)
     except Exception:
         pass
+    icon_file = proj.icon.get("image")
+    if icon_file:
+        try:
+            with zipfile.ZipFile(lsp_path, "r") as zf:
+                if icon_file in zf.namelist():
+                    with open(os.path.join(proj.path, icon_file), "wb") as fh:
+                        fh.write(zf.read(icon_file))
+        except Exception:
+            pass
     return proj
 
 

@@ -7,6 +7,7 @@ cuida de batching/caching pra nao reprocessar objetos estaticos toda hora.
 from . import render3d as r3d
 from . import shading
 from . import lighting as light_mod
+from . import glsl as glsl_mod
 
 
 class RenderStats(object):
@@ -76,6 +77,19 @@ class RenderPipeline(object):
         for entry in gbuf:
             near_lights = light_mod.filter_lights(lights, point=entry.pos, max_lights=self.max_lights)
             self.stats.lights_used = max(self.stats.lights_used, len(near_lights))
+
+            # ---- material GLSL (GPU, por pixel): pula o shading em CPU ----
+            mat_name = entry.material["shader"]
+            if glsl_mod.MATERIALS.is_glsl_material(mat_name):
+                out.append({
+                    "points": entry.points, "depth": entry.depth, "obj": entry.obj,
+                    "color": entry.albedo,                     # usado so como fallback se o shader falhar
+                    "glsl_material": mat_name,
+                    "world": entry.world, "uv": entry.uv, "tangent": entry.tangent,
+                    "normal": entry.normal, "lights": near_lights, "ambient": self.ambient,
+                })
+                continue
+
             static = self.is_static(entry.obj)
             if static:
                 key = (id(entry.obj), entry.face_idx)

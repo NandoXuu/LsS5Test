@@ -786,6 +786,51 @@ class Interpreter(object):
         s.set("split", _split)
         g.declare("string", s)
 
+        # utf8 (a engine ja trata string como sequencia de caracteres
+        # Unicode, nao bytes - entao aqui e so uma API no estilo do Lua
+        # 5.3+ pra quem preferir usar utf8.* explicitamente)
+        u8 = LuaTable()
+        u8.set("charpattern", ".")
+        u8.set("char", lambda *a: "".join(chr(int(x)) for x in a))
+        u8.set("len", lambda v="": float(len(tostring(v))))
+
+        def _u8_codepoint(v="", i=1, j=None):
+            v = tostring(v)
+            n = len(v)
+            i = int(i or 1)
+            if i < 0:
+                i = n + i + 1
+            j = int(j) if j is not None else i
+            if j < 0:
+                j = n + j + 1
+            return [float(ord(c)) for c in v[i - 1:j]]
+        u8.set("codepoint", _u8_codepoint)
+
+        def _u8_offset(v="", n=0, i=None):
+            v = tostring(v)
+            n = int(n or 0)
+            length = len(v)
+            start = int(i) if i is not None else (1 if n >= 0 else length + 1)
+            if start < 0:
+                start = length + start + 1
+            pos = start + n - (1 if n > 0 else 0)
+            if pos < 1 or pos > length + 1:
+                return [None]
+            return [float(pos)]
+        u8.set("offset", _u8_offset)
+
+        def _u8_codes(v=""):
+            v = tostring(v)
+
+            def it(s2, i):
+                i = int(i or 0)
+                if i >= len(s2):
+                    return [None]
+                return [float(i + 1), float(ord(s2[i]))]
+            return [it, v, 0.0]
+        u8.set("codes", _u8_codes)
+        g.declare("utf8", u8)
+
         # table
         t = LuaTable()
 

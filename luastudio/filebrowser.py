@@ -28,9 +28,7 @@ import os
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
-from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.textinput import TextInput
 
 from . import permissions as perms
 from . import theme
@@ -46,13 +44,16 @@ def default_shortcuts(project=None):
     android_root = "/storage/emulated/0"
     if project is not None and getattr(project, "path", None):
         out.append(("📦 Source", project.path))
-        out.append(("🖼 Source/Assets", os.path.join(project.path, "assets")))
+        out.append(("Imagem Source/Assets", os.path.join(project.path, "assets")))
     if os.path.isdir(android_root):
         out.append(("📱 Armazenamento", android_root))
         download = os.path.join(android_root, "Download")
         if os.path.isdir(download):
-            out.append(("⬇️ Download", download))
-    out.append(("🗂 LuaStudio", storage))
+            out.append(("Download Download", download))
+    documents = os.path.join(android_root, "Documents")
+    if os.path.isdir(documents):
+        out.append(("📄 Documents", documents))
+    out.append(("LuaStudio LuaStudio", storage))
     out.append(("/ Raiz", "/"))
     # remove duplicados mantendo ordem (ex: Source == Armazenamento)
     seen, dedup = set(), []
@@ -149,9 +150,7 @@ def open_picker(title, mode="folder", start=None, extensions=None,
     shortcuts = shortcuts or default_shortcuts()
 
     root = BoxLayout(orientation="vertical", spacing=8, padding=10)
-    popup = Popup(title=title, content=root, size_hint=(0.95, 0.9),
-                  title_color=theme.TEXT, title_size=17,
-                  separator_color=theme.ACCENT, background_color=theme.BG)
+    popup = theme.styled_popup(title, root, size_hint=(0.95, 0.9))
 
     # ---- atalhos (chips horizontais) ----
     shortcuts_scroll = ScrollView(size_hint_y=None, height=46,
@@ -163,12 +162,9 @@ def open_picker(title, mode="folder", start=None, extensions=None,
 
     # ---- caminho atual: subir + caminho digitável + Ir ----
     path_bar = BoxLayout(size_hint_y=None, height=46, spacing=6)
-    up_btn = theme.RoundButton(text="⬆️", size_hint_x=None, width=48,
+    up_btn = theme.IconButton(icon="back", text="", size_hint_x=None, width=48,
                                bg_color=theme.SURFACE_2, radius=10)
-    path_in = TextInput(multiline=False, font_size=13,
-                        background_color=theme.EDITOR_BG,
-                        foreground_color=theme.TEXT, cursor_color=theme.CURSOR,
-                        padding=(10, 12))
+    path_in = theme.make_input(font_size=13, padding=(10, 12))
     go_btn = theme.RoundButton(text="Ir", size_hint_x=None, width=56,
                                bg_color=theme.ACCENT, radius=10)
     path_bar.add_widget(up_btn)
@@ -187,7 +183,7 @@ def open_picker(title, mode="folder", start=None, extensions=None,
     # ---- rodape ----
     bottom = BoxLayout(size_hint_y=None, height=50, spacing=6)
     select_btn = theme.RoundButton(
-        text=select_label or "✅  Selecionar esta pasta",
+        text=select_label or "OK Selecionar esta pasta",
         bg_color=theme.PLAY, radius=12)
     cancel_btn = theme.RoundButton(text="Cancelar", size_hint_x=None, width=110,
                                    bg_color=theme.SURFACE_2, radius=12)
@@ -216,7 +212,7 @@ def open_picker(title, mode="folder", start=None, extensions=None,
             def enter_dir(_b, p=full):
                 state["path"] = p
                 refresh()
-            listing.add_widget(_Row("📁  %s" % name, enter_dir))
+            listing.add_widget(_Row("Pasta %s" % name, enter_dir))
         for name in files:
             full = os.path.join(path, name)
 
@@ -224,7 +220,7 @@ def open_picker(title, mode="folder", start=None, extensions=None,
                 popup.dismiss()
                 if on_select:
                     on_select(p)
-            listing.add_widget(_Row("📄  %s" % name, pick_file, dim=True))
+            listing.add_widget(_Row("Arquivo %s" % name, pick_file, dim=True))
 
     def go_up(*_a):
         parent = os.path.dirname(state["path"].rstrip(os.sep))

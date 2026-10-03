@@ -23,6 +23,8 @@ from .stage import Stage
 from . import permissions as perms
 from . import project as luaproject
 from . import theme
+from . import screenfit
+from . import filebrowser
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,6 +53,10 @@ def _write_crash_log(text):
 class PlayerApp(App):
     title = "LuaStudio Player"
 
+    def __init__(self, autoload=None, **kw):
+        App.__init__(self, **kw)
+        self.autoload = autoload
+
     def build(self):
         if Window is not None:
             try:
@@ -68,10 +74,17 @@ class PlayerApp(App):
         self.root_box = BoxLayout(orientation="vertical")
         self.runtime = None
         self.stage = None
+        self.stage_fit = None
         self._tmpdir = None
         Clock.schedule_interval(self._tick, 1.0 / 45.0)
         try:
-            self._show_picker()
+            if self.autoload:
+                self.status = Label(text="")
+                self.open_lsp(self.autoload)
+                if self.runtime is None:
+                    raise RuntimeError(self.status.text or "falha ao abrir o jogo")
+            else:
+                self._show_picker()
         except Exception:
             import traceback
             tb = traceback.format_exc()
@@ -137,12 +150,19 @@ class PlayerApp(App):
             b.bind(on_release=lambda _b, f=full: self._safe(self.open_lsp, f))
             listing.add_widget(b)
 
-        refresh = RoundButton(text="🔄  Atualizar lista", size_hint_y=None, height=48,
-                              bg_color=theme.ACCENT, radius=12)
+        row = BoxLayout(size_hint_y=None, height=48, spacing=8)
+        refresh = RoundButton(text="Atualizar Atualizar lista", bg_color=theme.SURFACE_2,
+                              radius=12)
         refresh.bind(on_release=lambda *a: self._safe(self._show_picker))
-        box.add_widget(refresh)
+        row.add_widget(refresh)
 
-        perm_btn = RoundButton(text="🔐  Permissao de armazenamento", size_hint_y=None,
+        browse = RoundButton(text="Pasta Procurar .Lsp...", bg_color=theme.ACCENT,
+                             radius=12)
+        browse.bind(on_release=lambda *a: self._safe(self._browse_lsp))
+        row.add_widget(browse)
+        box.add_widget(row)
+
+        perm_btn = RoundButton(text="Permissoes Permissao de armazenamento", size_hint_y=None,
                                height=44, bg_color=theme.WARN, radius=12)
         perm_btn.bind(on_release=lambda *a: self._safe(
             lambda: (perms.request(["storage"]), self._show_picker())))
@@ -152,6 +172,18 @@ class PlayerApp(App):
                             font_size=13)
         box.add_widget(self.status)
         self.root_box.add_widget(box)
+
+    def _browse_lsp(self):
+        """Navegador de arquivos livre pra achar um .Lsp em qualquer
+        pasta do aparelho (nao so nas pastas padrao que _show_picker ja
+        lista sozinho)."""
+        filebrowser.open_picker(
+            title="Escolher jogo (.Lsp)",
+            mode="file",
+            extensions=[luaproject.LSP_EXT],
+            shortcuts=filebrowser.default_shortcuts(),
+            on_select=lambda path: self._safe(self.open_lsp, path),
+        )
 
     # ------------------------------------------------------------ tela 2
     def open_lsp(self, lsp_path):
@@ -177,8 +209,19 @@ class PlayerApp(App):
 
         self.runtime = Runtime(log=self._log, base_dir=self._tmpdir)
         self.stage = Stage(self.runtime)
+
+        # tela: fullscreen de verdade + orientacao travada (configurados
+        # no LuaStudio, botao "🖥 Tela") + proporcao fixa sem esticar.
+        screen_cfg = manifest.get("screen") or screenfit.default_screen_config()
+        screenfit.apply_screen_mode(screen_cfg)
+        vw, vh = screenfit.resolve_virtual_size(
+            screen_cfg.get("aspect"), screen_cfg.get("orientation"), base=720.0)
+        self.stage_fit = screenfit.FitContainer(
+            self.stage, virtual_w=vw, virtual_h=vh, bars_color=(0, 0, 0, 1),
+            pixel_perfect=(screen_cfg.get("fit") == "pixel_perfect"))
+
         self.root_box.clear_widgets()
-        self.root_box.add_widget(self.stage)
+        self.root_box.add_widget(self.stage_fit)
 
         entry = manifest.get("entry") or sorted(scripts.keys())[0]
         ok = self.runtime.run_project(scripts, entry)
@@ -192,16 +235,22 @@ class PlayerApp(App):
         box.add_widget(Label(text="[LuaStudio Player] '%s' falhou ao iniciar.\n"
                                    "Veja o log abaixo. Toque em Voltar." % name,
                              color=theme.STOP, font_size=14))
-        back = RoundButton(text="↩  Voltar pra lista", size_hint_y=None, height=44,
+        back = RoundButton(text="Voltar Voltar pra lista", size_hint_y=None, height=44,
                            bg_color=theme.SURFACE_2, radius=12)
         back.bind(on_release=lambda *a: self._back_to_picker())
         box.add_widget(back)
         self.root_box.add_widget(box)
 
     def _back_to_picker(self):
+        if self.autoload:
+            self.stop()
+            return
         if self.runtime is not None:
             self.runtime.stop()
+        if self.stage is not None:
+            self.stage.release_input()
         self.stage = None
+        self.stage_fit = None
         self.runtime = None
         self._show_picker()
 
@@ -235,9 +284,9 @@ class PlayerApp(App):
         return True
 
 
-def main():
+def main(autoload=None):
     if Window is None:
         print("[LuaStudio Player] Kivy nao conseguiu abrir uma janela.\n"
               "No Pydroid 3: use 'Play' neste main.py.")
         return
-    PlayerApp().run()
+    PlayerApp(autoload=autoload).run()

@@ -7,18 +7,32 @@ import math
 import time
 import json as _json
 import random as _random
+import threading
 
 from .lua import (Interpreter, LuaTable, LuaError, LuaSyntaxError, tostring, truthy,
                   as_list, first, from_py, to_py)
 from .api import Scene, CreateRoot, Instance, vec_table, to_vec, to_color, safe_float
 from .vector import Vector2, Vector3, VECTOR2, VECTOR3
 from .audio import Audio
+from .fonts import FontManager
 from .physics import Physics2D
 from .tween import TweenService
 from .particles import ParticleSystem
+from . import destruction as destruction_mod
 from .profiler import Profiler
 from . import audio_dsp
 from . import permissions as perms
+from . import tilemap as tilemap_mod
+from . import http_client
+from . import tts as tts_mod
+from . import input_api
+from . import dualsense as dualsense_mod
+from . import dualsense_api
+from .inputs import InputManager
+from . import richtext as richtext_mod
+from . import diagnostics
+from . import uitheme
+from . import glsl as glsl_mod
 
 # Orcamento de "passos" de execucao Lua por frame/evento - protege contra
 # `while true do end` (ou qualquer outro loop infinito) travando o app
@@ -46,6 +60,7 @@ class Runtime(object):
         self.base_dir = base_dir
         self.scene = Scene(self)
         self.audio = Audio(self.log, base_dir)
+        self.fonts = FontManager(self.resolve, lambda: self.base_dir, self.log)
         self.physics = Physics2D(self)
         self.tween = TweenService(self)
         self.particles = ParticleSystem(self)
@@ -57,11 +72,14 @@ class Runtime(object):
         self.update_handlers = []
         self.touch_handlers = []
         self.key_handlers = []
+        self.pad_button_handlers = []
+        self.pad_connect_handlers = []
         self.start_time = time.time()
         self.stage_size = (800.0, 600.0)
         self.background = (0.06, 0.07, 0.10, 1)
         self.ambient2d_color = (1.0, 1.0, 1.0)   # cor da luz ambiente 2D
         self.ambient2d_intensity = 1.0           # 1.0 = nao escurece nada (retrocompativel)
+        self.ambient2d_explicit = False          # true depois de light2d.ambient(...) com intensidade
         self.max_lights2d = 8                    # light filtering 2D (luzes por objeto)
         self.running = False
         self.scene_registry = {}   # nome -> funcao Lua que monta a cena
@@ -74,7 +92,82 @@ class Runtime(object):
         self.project_scripts = {}       # projeto atual: nome_arquivo.lua -> codigo (pra require)
         self._modules = {}              # cache de modulos ja carregados via require()
         self._loading_stack = set()     # pra detectar require ciclico
+        # cache de tilemaps carregados: caminho_absoluto -> (dados, mtime)
+        # - so re-le/re-parseia do disco se o arquivo mudou (otimizacao:
+        # um mapa de 100x100 nao precisa ser re-parseado a cada frame).
+        self._tilemap_cache = {}
+        self.layer_state = {}          # indice da Layer -> {"opacity":, "shader":, "uniforms":}
+        self.postfx = None
+        self._http_lock = threading.Lock()
+        self._http_queue = []          # fila de (callback, resultado) de http.*Async
+        self.input = InputManager(self.log, android=perms.ANDROID)
+        self.input.listeners.append(self._on_input_event)
+        self.dualsense = dualsense_mod.DualSense(self.log, perms.ANDROID)
+        self.audio.mixer_bus.route(tts_mod.BUS_SOURCE, tts_mod.BUS_NAME)
+        self.tts = tts_mod.TTS(
+            self.log,
+            lambda: self.audio.mixer,
+            lambda v: self.audio.mixer_bus.resolve_volume(tts_mod.BUS_SOURCE, v))
         self.install_api()
+
+    # -------------------------------------------------------- tilemaps
+    def _tilemap_instance(self, name):
+        obj = self.scene.find(tostring(name))
+        if obj is None or obj.cls != "tilemap" or not obj.alive:
+            return None
+        return obj
+
+    def get_tilemap_data(self, path):
+        """Devolve o dict do mapa (com cache por mtime) pro caminho ja
+        RESOLVIDO `path`. Usado tanto pela API Lua `Tilemap.*` quanto pelo
+        desenho da classe 'tilemap' no Stage - um so cache pros dois."""
+        if not path or not os.path.isfile(path):
+            return None
+        entry = self._tilemap_cache.get(path)
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            mtime = 0
+        if entry is not None and entry[1] == mtime:
+            return entry[0]
+        try:
+            data = tilemap_mod.load(path)
+        except Exception as ex:
+            self.log("[tilemap] erro ao carregar '%s': %s" % (path, ex))
+            return None
+        self._tilemap_cache[path] = (data, mtime)
+        return data
+
+    def _tilemap_data_for(self, name):
+        obj = self._tilemap_instance(name)
+        if obj is None:
+            return None, None
+        path = self.resolve(str(obj.props.get("File") or ""))
+        return path, self.get_tilemap_data(path)
+
+    def _tilemap_get(self, name, col, row):
+        _path, data = self._tilemap_data_for(name)
+        if data is None:
+            return 0.0
+        return float(tilemap_mod.get_tile(data, col, row))
+
+    def _tilemap_set(self, name, col, row, tid):
+        _path, data = self._tilemap_data_for(name)
+        if data is None:
+            return False
+        return bool(tilemap_mod.set_tile(data, col, row, tid))
+
+    def _tilemap_size(self, name):
+        _path, data = self._tilemap_data_for(name)
+        if data is None:
+            return vec_table(0, 0, 0)
+        return vec_table(data["cols"], data["rows"], 0)
+
+    def _tilemap_reload(self, name):
+        path, _data = self._tilemap_data_for(name)
+        if path and path in self._tilemap_cache:
+            del self._tilemap_cache[path]
+        return path is not None
 
     # ------------------------------------------------------------- API Lua
     def install_api(self):
@@ -142,8 +235,28 @@ class Runtime(object):
         input_t = LuaTable()
         input_t.set("mousePosition", lambda *a: vec_table(self.mouse_pos[0], self.mouse_pos[1]))
         input_t.set("isMouseDown", lambda btn=1: self.mouse_button_name(btn) in self.mouse_buttons)
+        input_api.install(self, input_t)
         g("input", input_t)
         g("Input", input_t)
+
+        dualsense_t = dualsense_api.install(self)
+        g("dualsense", dualsense_t)
+        g("DualSense", dualsense_t)
+
+        # ---- Tilemap: le/edita (em memoria, no runtime) os mapas feitos
+        # no Editor de Tilemaps (app separado) e usados por create.tilemap
+        # - a engine ja desenha o mapa sozinha (Stage), isso aqui e so pra
+        # scripts que precisam ler/mudar tiles em tempo real (ex: destruir
+        # um bloco, checar colisao por tile etc.), sem escrever a leitura
+        # do arquivo na mao.
+        tilemap_t = LuaTable()
+        tilemap_t.set("GetTile", lambda name=None, col=0, row=0:
+                      self._tilemap_get(name, col, row))
+        tilemap_t.set("SetTile", lambda name=None, col=0, row=0, tid=0:
+                      self._tilemap_set(name, col, row, tid))
+        tilemap_t.set("Size", lambda name=None: self._tilemap_size(name))
+        tilemap_t.set("Reload", lambda name=None: self._tilemap_reload(name))
+        g("Tilemap", tilemap_t)
 
         # ---- android / permissoes (plugin do Pydroid 3) ----
         android = LuaTable()
@@ -182,6 +295,18 @@ class Runtime(object):
             h = perms.compass_heading()
             return float(h) if h is not None else None
         android.set("compassHeading", _compass_heading)
+
+        # -- magnetometro bruto (X, Y, Z em microtesla, sem virar 0-360) --
+        def _compass_field(*a):
+            xyz = perms.compass_field()
+            if xyz is None:
+                return None
+            t = LuaTable()
+            t.set("x", xyz[0]); t.set("y", xyz[1]); t.set("z", xyz[2])
+            t.set(1, xyz[0]); t.set(2, xyz[1]); t.set(3, xyz[2])
+            return t
+        android.set("compassField", _compass_field)
+        android.set("magnetometer", _compass_field)
 
         # -- microfone --
         android.set("micStart", lambda path=None:
@@ -250,7 +375,7 @@ class Runtime(object):
         def _read(path=""):
             p = self.resolve(tostring(path))
             try:
-                with open(p, "r") as fh:
+                with open(p, "r", encoding="utf-8") as fh:
                     return fh.read()
             except Exception as ex:
                 self.log("[fs] erro lendo %s: %s" % (path, ex))
@@ -261,7 +386,7 @@ class Runtime(object):
             perms.request(["storage"])
             p = self.resolve(tostring(path))
             try:
-                with open(p, "w") as fh:
+                with open(p, "w", encoding="utf-8") as fh:
                     fh.write(tostring(data))
                 return True
             except Exception as ex:
@@ -354,6 +479,35 @@ class Runtime(object):
             self.audio.set_camera2d(position=to_vec(pos) if pos is not None else None,
                                     zoom=float(zoom) if zoom is not None else None)
         sound.set("setCamera2D", _sound_set_camera2d)
+
+        # ---- pitch ao vivo: muda em tempo real, com o som tocando, sem
+        # pausar/reiniciar (sirene, vibrato, glide, efeitos tipo "onda") ----
+        def _sound_play_live_pitch(name=None, opts=None):
+            inst = self.scene.find(tostring(name)) if name else None
+            if inst is None or inst.cls != "sound":
+                return
+            bus = "SFX"
+            pitch = 0.0
+            chunk_ms = 45.0
+            if isinstance(opts, LuaTable):
+                bus = tostring(opts.get("Bus") or "SFX")
+                pitch = float(opts.get("Pitch") or 0.0)
+                chunk_ms = float(opts.get("ChunkMs") or 45.0)
+            self.audio.play_live_pitch(inst, bus=bus, start_pitch=pitch, chunk_ms=chunk_ms)
+        sound.set("playLivePitch", _sound_play_live_pitch)
+
+        def _sound_set_pitch(name=None, semitones=0.0):
+            inst = self.scene.find(tostring(name)) if name else None
+            if inst is not None:
+                self.audio.set_live_pitch(inst, float(semitones or 0.0))
+        sound.set("setPitch", _sound_set_pitch)
+        sound.set("setLivePitch", _sound_set_pitch)
+
+        def _sound_stop_live_pitch(name=None):
+            inst = self.scene.find(tostring(name)) if name else None
+            if inst is not None:
+                self.audio.stop_live_pitch(inst)
+        sound.set("stopLivePitch", _sound_stop_live_pitch)
         g("sound", sound)
 
         # ---- mixer: buses (Master/Music/SFX/Voice/UI), volume em dB, roteamento ----
@@ -378,14 +532,21 @@ class Runtime(object):
         profiler_t.set("reset", lambda *a: self.profiler.reset())
         g("profiler", profiler_t)
 
-        # ---- post-processing (vinheta, bloom, aberracao, grading) ----
+        # ---- post-processing de tela inteira: efeito embutido + shaders GLSL ----
         postfx_t = LuaTable()
 
-        def _postfx_set(opts=None):
+        def _fx():
             fx = getattr(self, "postfx", None)
             if fx is None:
                 from .postfx import PostFXChain
                 fx = self.postfx = PostFXChain()
+            return fx
+
+        def _uniform_dict(opts):
+            return glsl_mod._table_to_dict(opts) if isinstance(opts, LuaTable) else {}
+
+        def _postfx_set(opts=None):
+            fx = _fx()
             if isinstance(opts, LuaTable):
                 kw = {}
                 for lk, pk in (("Vignette", "vignette"), ("Bloom", "bloom"),
@@ -394,8 +555,259 @@ class Runtime(object):
                     if opts.get(lk) is not None:
                         kw[pk] = opts.get(lk)
                 fx.set(**kw)
-        postfx_t.set("set", _postfx_set)
+
+        def _postfx_add(name=None, opts=None):
+            _fx().add(tostring(name), _uniform_dict(opts))
+
+        def _postfx_remove(name=None):
+            _fx().remove(tostring(name))
+
+        def _postfx_clear(*_a):
+            fx = _fx()
+            fx.clear()
+            fx.enabled = False
+
+        def _postfx_set_uniform(name=None, key=None, value=None):
+            return bool(_fx().set_uniform(tostring(name), tostring(key), value))
+
+        def _postfx_list(*_a):
+            return LuaTable(_fx().names())
+
+        for names, fn in ((("set", "Set"), _postfx_set), (("add", "Add"), _postfx_add),
+                          (("remove", "Remove"), _postfx_remove), (("clear", "Clear"), _postfx_clear),
+                          (("setUniform", "SetUniform"), _postfx_set_uniform),
+                          (("list", "List"), _postfx_list)):
+            for n in names:
+                postfx_t.set(n, fn)
         g("postfx", postfx_t)
+        g("PostFX", postfx_t)
+
+        # ---- Shader: uniforms em tempo real de qualquer create.shader.X ----
+        shader_t = LuaTable()
+
+        def _shader_set_uniform(name=None, key=None, value=None):
+            ok = glsl_mod.SHADERS.set_uniform(tostring(name), tostring(key), value)
+            self.scene.dirty = True
+            return bool(ok)
+
+        def _shader_get_uniform(name=None, key=None):
+            return glsl_mod.SHADERS.get_uniform(tostring(name), tostring(key))
+
+        def _shader_set_uniforms(name=None, tbl=None):
+            for k, v in _uniform_dict(tbl).items():
+                glsl_mod.SHADERS.set_uniform(tostring(name), k, v)
+            self.scene.dirty = True
+
+        def _shader_list(*_a):
+            return LuaTable(glsl_mod.SHADERS.names())
+
+        for names, fn in ((("SetUniform", "setUniform"), _shader_set_uniform),
+                          (("GetUniform", "getUniform"), _shader_get_uniform),
+                          (("SetUniforms", "setUniforms"), _shader_set_uniforms),
+                          (("List", "list"), _shader_list)):
+            for n in names:
+                shader_t.set(n, fn)
+        g("Shader", shader_t)
+
+        # ---- Layer: opacidade/shader por camada de renderizacao 2D
+        # (obj:LayerMove(n) define a Layer do objeto) ----
+        layer_t = LuaTable()
+
+        def _layer_entry(idx):
+            return self.layer_state.setdefault(int(idx or 0), {"opacity": 1.0, "shader": None, "uniforms": {}})
+
+        def _layer_set_opacity(idx=0, opacity=1.0):
+            entry = _layer_entry(idx)
+            entry["opacity"] = max(0.0, min(1.0, float(opacity if opacity is not None else 1.0)))
+            self.scene.dirty = True
+        layer_t.set("SetOpacity", _layer_set_opacity)
+        layer_t.set("setOpacity", _layer_set_opacity)
+
+        def _layer_set_shader(idx=0, shader=None):
+            entry = _layer_entry(idx)
+            entry["shader"] = tostring(shader) if shader else None
+            self.scene.dirty = True
+        layer_t.set("SetShader", _layer_set_shader)
+        layer_t.set("setShader", _layer_set_shader)
+
+        def _layer_reset(idx=0):
+            self.layer_state.pop(int(idx or 0), None)
+            self.scene.dirty = True
+        layer_t.set("Reset", _layer_reset)
+        layer_t.set("Clear", _layer_reset)
+
+        def _layer_set_uniform(idx=0, key=None, value=None):
+            entry = _layer_entry(idx)
+            entry.setdefault("uniforms", {})[tostring(key)] = value
+            self.scene.dirty = True
+        layer_t.set("SetUniform", _layer_set_uniform)
+        layer_t.set("setUniform", _layer_set_uniform)
+
+        def _layer_get(idx=0):
+            entry = self.layer_state.get(int(idx or 0), {"opacity": 1.0, "shader": None})
+            t = LuaTable()
+            t.set("Opacity", float(entry.get("opacity", 1.0)))
+            t.set("Shader", entry.get("shader"))
+            return t
+        layer_t.set("Get", _layer_get)
+        g("Layer", layer_t)
+        g("layer", layer_t)
+
+        # ---- UI: temas (SUPER CUSTOMIZER item 8/tema) ----
+        # UI.Theme("Nome", { Font=, Colors={Primary=,Background=,Text=,Border=},
+        #                    Button={Radius=,BorderSize=,...}, ... })
+        # UI.SetTheme("Nome") so registra qual e o "tema atual" (Theme.Get()) -
+        # cada objeto ainda precisa de `Theme = "Nome"` pra realmente usa-lo,
+        # do jeito que create.button.Play{Theme="Nome"} faz.
+        ui_t = LuaTable()
+
+        def _ui_theme(name=None, spec=None):
+            if name and spec is not None:
+                uitheme.THEMES.register(tostring(name), spec)
+            self.scene.dirty = True
+        ui_t.set("Theme", _ui_theme)
+
+        def _ui_set_theme(name=None):
+            uitheme.THEMES.set_current(tostring(name) if name else None)
+            self.scene.dirty = True
+        ui_t.set("SetTheme", _ui_set_theme)
+        ui_t.set("CurrentTheme", lambda *a: uitheme.THEMES.current)
+        g("UI", ui_t)
+        g("ui", ui_t)
+
+        # ---- RichText: estilos customizados usados pelas tags <tag>...</tag> ----
+        richtext_t = LuaTable()
+
+        def _richtext_style(tag=None, spec=None):
+            if tag is None:
+                return
+            data = {}
+            if isinstance(spec, LuaTable):
+                for k, v in spec.items():
+                    if isinstance(k, str):
+                        data[k] = v
+            richtext_mod.define_style(tostring(tag), data)
+        richtext_t.set("Style", _richtext_style)
+        richtext_t.set("DefineStyle", _richtext_style)
+        richtext_t.set("ClearStyle", lambda tag=None: richtext_mod.clear_style(tostring(tag) if tag else None))
+        g("RichText", richtext_t)
+
+        # ---- HTTP: http.get/post/put/delete/request (bloqueante) e as
+        # variantes *Async (thread + fila de eventos processada a cada
+        # frame em Runtime.update, pra nunca travar a janela) ----
+        http_t = LuaTable()
+
+        def _headers_from(h):
+            out = {}
+            if isinstance(h, LuaTable):
+                for k, v in h.items():
+                    out[str(k)] = tostring(v)
+            return out
+
+        def _body_from(b):
+            if isinstance(b, LuaTable):
+                return to_py(b)
+            if b is None:
+                return None
+            return tostring(b)
+
+        def _opts_from(t):
+            url, method, headers, body = "", "GET", {}, None
+            if isinstance(t, LuaTable):
+                url = tostring(t.get("url") or t.get("Url") or "")
+                method = tostring(t.get("method") or t.get("Method") or "GET")
+                headers = _headers_from(t.get("headers") or t.get("Headers"))
+                body = _body_from(t.get("body") or t.get("Body"))
+            return url, method, headers, body
+
+        def _http_get(url="", headers=None):
+            return self._http_result(http_client.request(tostring(url), "GET", _headers_from(headers)))
+        http_t.set("get", _http_get)
+
+        def _http_post(url="", body=None, headers=None):
+            return self._http_result(http_client.request(tostring(url), "POST",
+                                                          _headers_from(headers), _body_from(body)))
+        http_t.set("post", _http_post)
+
+        def _http_put(url="", body=None, headers=None):
+            return self._http_result(http_client.request(tostring(url), "PUT",
+                                                          _headers_from(headers), _body_from(body)))
+        http_t.set("put", _http_put)
+
+        def _http_delete(url="", headers=None):
+            return self._http_result(http_client.request(tostring(url), "DELETE", _headers_from(headers)))
+        http_t.set("delete", _http_delete)
+
+        def _http_request(opts=None):
+            url, method, headers, body = _opts_from(opts)
+            return self._http_result(http_client.request(url, method, headers, body))
+        http_t.set("request", _http_request)
+
+        def _spawn(fn, callback):
+            def _run():
+                result = fn()
+                with self._http_lock:
+                    self._http_queue.append((callback, result))
+            threading.Thread(target=_run, daemon=True).start()
+
+        def _http_get_async(url="", callback=None, headers=None):
+            _spawn(lambda: http_client.request(tostring(url), "GET", _headers_from(headers)), callback)
+        http_t.set("getAsync", _http_get_async)
+
+        def _http_post_async(url="", body=None, callback=None, headers=None):
+            _spawn(lambda: http_client.request(tostring(url), "POST",
+                                               _headers_from(headers), _body_from(body)), callback)
+        http_t.set("postAsync", _http_post_async)
+
+        def _http_put_async(url="", body=None, callback=None, headers=None):
+            _spawn(lambda: http_client.request(tostring(url), "PUT",
+                                               _headers_from(headers), _body_from(body)), callback)
+        http_t.set("putAsync", _http_put_async)
+
+        def _http_delete_async(url="", callback=None, headers=None):
+            _spawn(lambda: http_client.request(tostring(url), "DELETE", _headers_from(headers)), callback)
+        http_t.set("deleteAsync", _http_delete_async)
+
+        def _http_request_async(opts=None, callback=None):
+            url, method, headers, body = _opts_from(opts)
+            _spawn(lambda: http_client.request(url, method, headers, body), callback)
+        http_t.set("requestAsync", _http_request_async)
+        g("http", http_t)
+        g("Http", http_t)
+
+        # ---- TTS: tts.speak(texto, "pt"|"en"|"es"|"fr"|...) ----
+        tts_t = LuaTable()
+
+        def _tts_speak(text=None, lang=None, opts=None):
+            slow, volume, interrupt, cb = False, 1.0, False, None
+            if isinstance(opts, LuaTable):
+                slow = truthy(opts.get("slow") if opts.get("slow") is not None else opts.get("Slow"))
+                v = opts.get("volume") if opts.get("volume") is not None else opts.get("Volume")
+                volume = safe_float(v, 1.0) if v is not None else 1.0
+                interrupt = truthy(opts.get("interrupt") if opts.get("interrupt") is not None else opts.get("Interrupt"))
+                cb = opts.get("onFinish") or opts.get("OnFinish") or opts.get("callback")
+            elif opts is not None and not isinstance(opts, (str, bool, int, float)):
+                cb = opts
+            if lang is not None and not isinstance(lang, str):
+                lang = None
+            return bool(self.tts.speak(tostring(text) if text is not None else "", lang,
+                                       slow=slow, volume=volume, interrupt=interrupt, on_finish=cb))
+        tts_t.set("speak", _tts_speak)
+        tts_t.set("say", _tts_speak)
+        tts_t.set("stop", lambda *a: self.tts.stop())
+        tts_t.set("isSpeaking", lambda *a: self.tts.is_speaking())
+        tts_t.set("pending", lambda *a: float(self.tts.pending()))
+        tts_t.set("setLanguage", lambda lang=None: self.tts.set_language(tostring(lang) if lang else ""))
+        tts_t.set("getLanguage", lambda *a: self.tts.default_lang)
+
+        def _tts_languages(*a):
+            t = LuaTable()
+            for code, name in tts_mod.COMMON_LANGS.items():
+                t.set(code, name)
+            return t
+        tts_t.set("languages", _tts_languages)
+        g("tts", tts_t)
+        g("TTS", tts_t)
 
         # ---- camera helper: create.camera.Main{...} tambem funciona ----
         def _wait(*a):
@@ -436,6 +848,7 @@ class Runtime(object):
                 self.ambient2d_color = to_color(c, self.ambient2d_color + (1.0,))[:3]
             if intensity is not None:
                 self.ambient2d_intensity = float(intensity)
+                self.ambient2d_explicit = True
         light2d_t.set("ambient", _ambient2d)
         light2d_t.set("setMaxLights", lambda n=8: setattr(self, "max_lights2d", max(1, int(n or 8))))
         g("light2d", light2d_t)
@@ -457,6 +870,23 @@ class Runtime(object):
             return [obj, vec_table(hx, hy)]
         physics.set("raycast", _raycast)
         g("physics", physics)
+
+        destruction_t = LuaTable()
+
+        def _destruction_create(spec=None):
+            name = None
+            if isinstance(spec, LuaTable) and spec.get("Name"):
+                name = tostring(spec.get("Name"))
+            if not name:
+                self._destruction_seq = getattr(self, "_destruction_seq", 0) + 1
+                name = "mesh_%d" % self._destruction_seq
+            fragments = spec.get("Fragments") if isinstance(spec, LuaTable) else None
+            inst = scene.create("destructmesh", name, spec)
+            destruction_mod.build_instance_mesh(inst, self.resolve, fragments)
+            return inst
+        destruction_t.set("create", _destruction_create)
+        destruction_t.set("find", lambda name=None: scene.find(name))
+        g("Destruction", destruction_t)
 
         # ---- TweenService ----
         tween = LuaTable()
@@ -525,7 +955,7 @@ class Runtime(object):
 
         def _json_encode(v=None):
             try:
-                return _json.dumps(to_py(v))
+                return _json.dumps(to_py(v), ensure_ascii=False)
             except Exception as ex:
                 self.log("[json] erro ao codificar: %s" % ex)
                 return None
@@ -556,7 +986,7 @@ class Runtime(object):
         def _save_load_all():
             p = _save_path()
             try:
-                with open(p, "r") as fh:
+                with open(p, "r", encoding="utf-8") as fh:
                     return _json.load(fh)
             except Exception:
                 return {}
@@ -565,8 +995,8 @@ class Runtime(object):
             data = _save_load_all()
             data[tostring(key)] = to_py(value)
             try:
-                with open(_save_path(), "w") as fh:
-                    _json.dump(data, fh)
+                with open(_save_path(), "w", encoding="utf-8") as fh:
+                    _json.dump(data, fh, ensure_ascii=False)
                 return True
             except Exception as ex:
                 self.log("[savedata] erro ao salvar: %s" % ex)
@@ -586,15 +1016,15 @@ class Runtime(object):
             data = _save_load_all()
             data.pop(tostring(key), None)
             try:
-                with open(_save_path(), "w") as fh:
-                    _json.dump(data, fh)
+                with open(_save_path(), "w", encoding="utf-8") as fh:
+                    _json.dump(data, fh, ensure_ascii=False)
             except Exception as ex:
                 self.log("[savedata] erro ao remover: %s" % ex)
         save.set("remove", _save_remove)
 
         def _save_clear():
             try:
-                with open(_save_path(), "w") as fh:
+                with open(_save_path(), "w", encoding="utf-8") as fh:
                     fh.write("{}")
                 return True
             except Exception as ex:
@@ -603,6 +1033,32 @@ class Runtime(object):
         save.set("clear", lambda *a: _save_clear())
         g("SaveData", save)
         g("save", save)
+
+    def _http_result(self, result):
+        t = LuaTable()
+        t.set("status", float(result.get("status") or 0))
+        t.set("body", result.get("body") or "")
+        hdrs = LuaTable()
+        for k, v in (result.get("headers") or {}).items():
+            hdrs.set(str(k), str(v))
+        t.set("headers", hdrs)
+        err = result.get("error")
+        if err:
+            t.set("error", str(err))
+        return t
+
+    def _step_tts(self, dt):
+        for callback, ok, err in self.tts.drain_events():
+            self.call(callback, bool(ok), err)
+
+    def _step_http(self, dt):
+        if not self._http_queue:
+            return
+        with self._http_lock:
+            items, self._http_queue = self._http_queue, []
+        for callback, result in items:
+            if callback is not None:
+                self.call(callback, self._http_result(result))
 
     def _sound_op(self, name, op):
         inst = self.scene.find(name)
@@ -673,7 +1129,7 @@ class Runtime(object):
             p = self.resolve(cand)
             if os.path.isfile(p):
                 try:
-                    with open(p, "r") as fh:
+                    with open(p, "r", encoding="utf-8") as fh:
                         return fh.read()
                 except Exception:
                     pass
@@ -688,9 +1144,15 @@ class Runtime(object):
         self.stop_camera()
         perms.mic_level_stop()
         self.mouse_buttons = set()
+        self.input.reset_all()
+        self.dualsense.reset()
         self.hover_obj = None
         self._modules = {}
         self._loading_stack = set()
+        self.layer_state = {}
+        self.postfx = None
+        with self._http_lock:
+            self._http_queue = []
         self.interp = Interpreter(print_fn=self.log)
         self.interp.instruction_budget = DEFAULT_INSTRUCTION_BUDGET
         self.scene.runtime = self
@@ -700,6 +1162,7 @@ class Runtime(object):
         # linha marcar no editor. Formato: {"chunk": nome, "line": int,
         # "message": texto}.
         self.last_error = None
+        self.last_warnings = []
 
     def clear_scene(self):
         """Limpa objetos/fisica/tweens/timers/handlers, mas MANTEM o
@@ -714,6 +1177,8 @@ class Runtime(object):
         self.update_handlers = []
         self.touch_handlers = []
         self.key_handlers = []
+        self.pad_button_handlers = []
+        self.pad_connect_handlers = []
 
     _LINE_RE = re.compile(r"\(linha (\d+)\)")
 
@@ -736,17 +1201,23 @@ class Runtime(object):
 
     def run_source(self, source, chunkname="script.lua"):
         self.reset()
+        self.last_warnings = diagnostics.warnings(source)
+        for _line_no, _title, _explanation in self.last_warnings:
+            self.log(diagnostics.format_warning(_line_no, _title, _explanation))
         self.running = True
         try:
             self.interp.execute(source, chunkname)
             return True
         except LuaSyntaxError as ex:
-            self.log("[erro de sintaxe] %s" % self._record_error(chunkname, str(ex)))
+            raw = self._record_error(chunkname, str(ex))
+            self.log(diagnostics.format_compile(raw))
         except LuaError as ex:
-            self.log("[erro] %s" % self._record_error(chunkname, tostring(ex.value)))
+            raw = self._record_error(chunkname, tostring(ex.value))
+            self.log(diagnostics.format_runtime(raw))
         except Exception as ex:  # noqa
             msg = "%s: %s" % (type(ex).__name__, ex)
-            self.log("[erro interno] %s" % self._record_error(chunkname, msg))
+            raw = self._record_error(chunkname, msg)
+            self.log("[ERRO INTERNO] %s\nComo corrigir: confira a linha marcada e, se continuar, consulte o log completo.\nDetalhes: %s" % (raw, msg))
         self.running = False
         return False
 
@@ -766,6 +1237,9 @@ class Runtime(object):
 
     def stop(self):
         self.running = False
+        self.input.reset_state()
+        self.tts.stop()
+        self.dualsense.reset()
         self.audio.stop_all()
         self.stop_camera()
         perms.mic_level_stop()
@@ -867,18 +1341,29 @@ class Runtime(object):
             self.audio.set_camera2d(position=(cx + sx, cy + sy), zoom=zoom)
         self.audio.update_hrtf2d_all(self.scene, dt)
 
+    def _update_audio_live_pitch(self, dt):
+        """Alimenta os canais de pitch ao vivo com o proximo pedaco de
+        audio, na taxa (pitch) mais atual — chamado todo frame."""
+        self.audio.update_live_pitch_all(dt)
+
     def update(self, dt):
         if not self.running:
             return
         dt = safe_dt(dt)
         self._reset_budget()
+        self._safe_step(self.input.drain_native, dt)
         self._safe_step(self._update_camera2d, dt)
         self._safe_step(self.physics.step, dt)
         self._safe_step(self.tween.step, dt)
         self._safe_step(self.particles.step, dt)
+        self._safe_step(self._step_fragments, dt)
         self._safe_step(self._step_timers, dt)
         self._safe_step(self._step_animations, dt)
         self._safe_step(self._update_audio_hrtf2d, dt)
+        self._safe_step(self._update_audio_live_pitch, dt)
+        self._safe_step(self._step_http, dt)
+        self._safe_step(self._step_tts, dt)
+        self._safe_step(self.dualsense.update, dt)
         t = time.time() - self.start_time
         for fn in list(self.update_handlers):
             self.call(fn, float(dt), float(t))
@@ -886,6 +1371,7 @@ class Runtime(object):
             cb = obj.props.get("OnUpdate")
             if cb is not None:
                 self.call(cb, obj, float(dt), float(t))
+        self.input.end_frame()
 
     def _safe_step(self, fn, *args):
         """Roda uma etapa interna do frame (fisica/tween/particulas/...)
@@ -903,6 +1389,19 @@ class Runtime(object):
         pra `while true do end` (ou qualquer loop infinito) travar so
         aquele frame com um erro, ao inves de travar o app inteiro."""
         self.interp._steps = 0
+
+    def _step_fragments(self, dt):
+        for obj in list(self.scene.objects):
+            if obj.cls != "meshfragment" or not obj.alive:
+                continue
+            av = float(obj.props.get("AngularVelocity") or 0.0)
+            if av:
+                obj.props["Rotation"] = float(obj.props.get("Rotation") or 0.0) + av * dt
+            age = float(obj.props.get("Age") or 0.0) + dt
+            obj.props["Age"] = age
+            lifetime = float(obj.props.get("Lifetime") or 0.0)
+            if lifetime > 0 and age >= lifetime:
+                self.scene.remove(obj)
 
     def _step_timers(self, dt):
         if not self.timers:
@@ -946,6 +1445,24 @@ class Runtime(object):
                         self.call(cb, obj)
             obj.props["Frame"] = frame
             self.scene.dirty = True
+
+    def dispatch_key(self, name, phase="down", text=""):
+        self._reset_budget()
+        for fn in list(self.key_handlers):
+            self.call(fn, name, phase, text)
+
+    def _on_input_event(self, kind, *args):
+        if not self.running:
+            return
+        self._reset_budget()
+        if kind == "pad_button":
+            pid, name, down = args
+            for fn in list(self.pad_button_handlers):
+                self.call(fn, float(pid), name, bool(down))
+        elif kind == "pad_connect":
+            self.log("[input] gamepad %d detectado" % args[0])
+            for fn in list(self.pad_connect_handlers):
+                self.call(fn, float(args[0]))
 
     def dispatch_touch(self, x, y, phase="down", uid=0):
         self._reset_budget()

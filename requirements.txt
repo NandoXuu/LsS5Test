@@ -1,6 +1,0 @@
-kivy>=2.1.0
-pillow
-pygments
-# opcional (somente audio); carregado sob demanda, nunca antes do Kivy
-pygame
-numpy   # opcional (pitch/EQ/reverb/compressor no audio)
