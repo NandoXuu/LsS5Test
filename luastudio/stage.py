@@ -31,6 +31,7 @@ from . import render3d
 from . import lighting as light_mod
 from . import lighting2d as light2d_mod
 from . import normalmap2d as nm2d
+from . import spritesheet as sheet_mod
 from . import pipeline as pipeline_mod
 from . import texture as texture_mod
 from . import tilemap as tilemap_mod
@@ -55,6 +56,7 @@ class Stage(Widget):
         self._glsl_broken = set()  # materiais que falharam ao compilar (nao tenta de novo)
         self._normalmap_ctx = {}
         self._normalmap_broken = set()
+        self._normalmap_aspect_warned = set()
         self._pressed = {}   # touch.uid -> obj (pra desfazer o Transition no touch_up)
         self._layer_fbos = {}
         self._out = self.canvas
@@ -1100,7 +1102,7 @@ class Stage(Widget):
         self._normalmap_ctx[key] = rc
         return rc
 
-    def _draw_image_normalmap(self, obj, tex, normal_tex, rect, rot, flip_x, flip_y, uvs=None, shadow=1.0):
+    def _draw_image_normalmap(self, obj, tex, normal_tex, rect, rot, flip_x, flip_y, uvs=None, shadow=1.0, alpha=1.0):
         """Renderiza create.image + NormalMap + luzes 2D (difuso, especular
         half-vector, metallic, emission, AO) por pixel na GPU."""
         if tex is None or normal_tex is None:
@@ -1138,7 +1140,7 @@ class Stage(Widget):
                 rc["u_l%d_params" % i] = u["params"]
                 rc["u_l%d_dir" % i] = u["dir"]
             with rc:
-                Color(1, 1, 1, 1)
+                Color(1, 1, 1, float(alpha))
                 BindTexture(texture=normal_tex, index=1)
                 if uvs is None:
                     Rectangle(pos=(rx, ry), size=(rw, rh), texture=tex)
@@ -1376,6 +1378,15 @@ class Stage(Widget):
         if truthy(obj.props.get("Lit")) and self._cur_lights2d:
             col = (col[0] * lit_tint[0], col[1] * lit_tint[1], col[2] * lit_tint[2],
                   col[3] if len(col) > 3 else 1.0)
+        # create.image com Source: o Color vira TINT/OPACIDADE da textura (nao um
+        # retangulo solido atras dela - era isso que formava o quadrado branco).
+        img_tinted = (obj.cls == "image" and bool(str(obj.props.get("Source") or "").strip()))
+        img_tint = (lit_tint[0], lit_tint[1], lit_tint[2], style_opacity)
+        if img_tinted and ("Color" in obj._explicit_keys
+                           or obj.themed_value("Color", ui_state) != obj.props.get("Color")):
+            img_tint = (col[0], col[1], col[2], col[3])   # col ja inclui luz 2D (Lit) e Style.Opacity
+        # Color nunca setado => imagem normal (branco opaco); o default
+        # "#00000000" so existe pra nao pintar fundo em outras classes.
         g1 = obj.themed_value("GradientColor1", ui_state)
         g2 = obj.themed_value("GradientColor2", ui_state)
         grad_tex = None
@@ -1388,7 +1399,7 @@ class Stage(Widget):
                 RoundedRectangle(pos=(sx, sy), size=(w, h), radius=[radius], texture=grad_tex)
             else:
                 Rectangle(pos=(sx, sy), size=(w, h), texture=grad_tex)
-        elif col[3] > 0:
+        elif col[3] > 0 and not img_tinted:
             Color(*col)
             if radius > 0:
                 RoundedRectangle(pos=(sx, sy), size=(w, h), radius=[radius])
@@ -1413,16 +1424,21 @@ class Stage(Widget):
             normal_src = str(obj.props.get("NormalMap") or "")
             normal_tex = self._texture(normal_src, filter_mode=filter_mode) if normal_src else None
             if tex is not None:
-                cols = max(1, int(obj.props.get("Columns") or 1))
-                rows = max(1, int(obj.props.get("Rows") or 1))
-                frame_uvs = None
-                if cols > 1 or rows > 1:
-                    total = cols * rows
-                    frame = int(float(obj.props.get("Frame") or 0)) % total
-                    fx, fy = frame % cols, frame // cols
-                    u0, u1 = fx / float(cols), (fx + 1) / float(cols)
-                    v1, v0 = 1.0 - fy / float(rows), 1.0 - (fy + 1) / float(rows)
-                    frame_uvs = (u0, v0, u1, v0, u1, v1, u0, v1)
+                # UVs do frame atual: calculados UMA vez e reutilizados pelo
+                # Source e pelo NormalMap (sincronia garantida).
+                frame_uvs = sheet_mod.frame_uvs_from_props(obj.props)
+                if normal_tex is not None:
+                    # checagem de proporcao: so uma vez por (objeto, Source, NormalMap)
+                    chk = (obj.name, src, normal_src)
+                    if chk not in self._normalmap_aspect_warned:
+                        self._normalmap_aspect_warned.add(chk)
+                        if sheet_mod.aspect_mismatch((tex.width, tex.height),
+                                                     (normal_tex.width, normal_tex.height)):
+                            self.runtime.log(
+                                "[NormalMap2D] '%s': NormalMap (%dx%d) e Source (%dx%d) tem "
+                                "proporcoes diferentes; os frames do Normal Map nao vao alinhar "
+                                "com os do Source." % (obj.name, normal_tex.width,
+                                                       normal_tex.height, tex.width, tex.height))
                 normal_drawn = False
                 if normal_tex is not None and truthy(obj.props.get("Lit")):
                     if frame_uvs is None and truthy(obj.props.get("KeepAspect")) and tex.width and tex.height:
@@ -1433,9 +1449,9 @@ class Stage(Widget):
                         nm_rect = (sx, sy, w, h)
                     normal_drawn = self._draw_image_normalmap(
                         obj, tex, normal_tex, nm_rect, rot, flip_x, flip_y, frame_uvs,
-                        shadow=nm_shadow)
+                        shadow=nm_shadow, alpha=img_tint[3])
                 if not normal_drawn:
-                    Color(lit_tint[0], lit_tint[1], lit_tint[2], 1)
+                    Color(*img_tint)
                     if frame_uvs is not None:
                         Rectangle(pos=(sx, sy), size=(w, h), texture=tex, tex_coords=frame_uvs)
                     elif truthy(obj.props.get("KeepAspect")) and tex.width and tex.height:

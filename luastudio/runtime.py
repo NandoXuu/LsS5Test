@@ -33,6 +33,7 @@ from . import richtext as richtext_mod
 from . import diagnostics
 from . import uitheme
 from . import glsl as glsl_mod
+from . import spritesheet as sheet_mod
 
 # Orcamento de "passos" de execucao Lua por frame/evento - protege contra
 # `while true do end` (ou qualquer outro loop infinito) travando o app
@@ -1428,8 +1429,7 @@ class Runtime(object):
             speed = float(obj.props.get("FrameSpeed") or 0)
             if speed == 0 or not truthy(obj.props.get("Playing", True)):
                 continue
-            cols = max(1, int(obj.props.get("Columns") or 1))
-            rows = max(1, int(obj.props.get("Rows") or 1))
+            cols, rows = sheet_mod.grid_from_props(obj.props)
             total = cols * rows
             if total <= 1:
                 continue

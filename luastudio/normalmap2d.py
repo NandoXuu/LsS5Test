@@ -113,6 +113,8 @@ void add_light(vec2 pix, vec3 n, vec3 view_dir, vec2 lpos, vec3 lcolor, vec4 p, 
 
 void main(void)
 {
+    // MESMO uv (frame do spritesheet) para albedo e normal: o UV e normalizado,
+    // entao o NormalMap pode ter resolucao diferente do Source (mesma grade).
     vec2 uv = tex_coord0;
     vec2 pix = v_pix;
 
