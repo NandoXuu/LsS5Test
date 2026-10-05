@@ -232,6 +232,23 @@ def compass_heading():
         return None
 
 
+def compass_field():
+    """Campo magnetico bruto (x, y, z) em microtesla, vindo direto do
+    sensor (plyer.compass.field), sem conversao pra rumo 0-360.
+    Retorna None se indisponivel/desligada ou se o sensor ainda nao
+    entregou leitura (comum logo apos compass_enable())."""
+    if not ANDROID or not _compass_enabled:
+        return None
+    try:
+        from plyer import compass
+        field = compass.field
+        if not field or None in field:
+            return None
+        return (float(field[0]), float(field[1]), float(field[2]))
+    except Exception:
+        return None
+
+
 # ----------------------------------------------------------- microfone
 _mic_recording = False
 _mic_path = None
@@ -476,6 +493,37 @@ def hide_system_bars():
                  | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                  | View.SYSTEM_UI_FLAG_FULLSCREEN
                  | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+
+        def _apply(*_a):
+            try:
+                activity.getWindow().getDecorView().setSystemUiVisibility(flags)
+            except Exception:
+                pass
+        try:
+            from kivy.clock import Clock
+            Clock.schedule_once(_apply, 0)
+        except Exception:
+            _apply()
+        return True
+    except Exception as ex:
+        _last_error = str(ex)
+        return False
+
+
+def show_system_bars():
+    """Desfaz o modo imersivo de `hide_system_bars` (so Android): a barra
+    de status e a de navegacao voltam a aparecer. Usado ao sair do Play
+    e voltar pro editor / tela inicial."""
+    global _last_error
+    if not ANDROID:
+        return False
+    activity = _android_activity()
+    if activity is None:
+        return False
+    try:
+        from jnius import autoclass
+        View = autoclass("android.view.View")
+        flags = View.SYSTEM_UI_FLAG_VISIBLE
 
         def _apply(*_a):
             try:

@@ -10,6 +10,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Forca UTF-8 em stdout/stderr (Pydroid/Android as vezes usa outro encoding
+# padrao pro terminal, o que quebrava print() com acentos/emoji/CJK vindos
+# de print()/app.log() do jogo). Falha silenciosamente em Python < 3.7
+# (sem reconfigure) ou em consoles que nao suportam a troca.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Config do Kivy antes de qualquer import do Kivy.
 os.environ.setdefault("KIVY_NO_ARGS", "1")
 os.environ.setdefault("KIVY_NO_CONSOLELOG", "0")

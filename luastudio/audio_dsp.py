@@ -155,6 +155,99 @@ def pitch_shift(snd, semitones, log=None):
     return _array_to_sound(resampled, log) or snd
 
 
+def sound_to_array(snd):
+    """Wrapper publico de _sound_to_array (uso fora deste modulo)."""
+    return _sound_to_array(snd)
+
+
+def array_to_sound(arr, log=None):
+    """Wrapper publico de _array_to_sound (uso fora deste modulo)."""
+    return _array_to_sound(arr, log or (lambda s: None))
+
+
+class LivePitchStream(object):
+    """Pitch continuo, em tempo real, sem pausar/reiniciar o som.
+
+    Em vez de reamostrar o som inteiro de uma vez (como `pitch_shift`),
+    aqui a gente le a amostra original com uma taxa de leitura (`ratio`)
+    que pode ser trocada a qualquer momento — inclusive com o som ja
+    tocando — e entrega pequenos pedacos (chunks) de audio, um de cada
+    vez, pra serem enfileirados num pygame.mixer.Channel via `.queue()`.
+
+    Como o Channel toca o proximo chunk automaticamente assim que o
+    atual termina (sem gap), e cada chunk novo ja nasce com o pitch
+    mais recente, da pra fazer sirene/vibrato/glide etc. em tempo real
+    so chamando `set_pitch()` a cada frame, sem nenhum corte no audio.
+    """
+
+    def __init__(self, arr, loop=False, chunk_samples=1024):
+        self.arr = arr
+        self.n = arr.shape[0]
+        self.loop = bool(loop)
+        self.chunk_samples = max(64, int(chunk_samples))
+        self.pos = 0.0          # cursor de leitura, em amostras da fonte original
+        self.semitones = 0.0    # pitch ALVO; pode ser trocado a qualquer momento
+        self._cur_semitones = None  # pitch instantaneo (de onde o ultimo chunk parou)
+        self.finished = False   # True quando um som sem loop chegou ao fim
+
+    def set_pitch(self, semitones):
+        self.semitones = float(semitones)
+
+    def next_chunk(self):
+        """Gera o proximo pedaco. Em vez de usar um unico ratio fixo pro
+        chunk inteiro (o que faz o pitch "degrau-ar" a cada chunk — dava a
+        sensacao de bips/notas picotadas em vez de uma curva continua), o
+        pitch e interpolado amostra-a-amostra dentro do proprio chunk: comeca
+        exatamente de onde o chunk anterior parou (`_cur_semitones`) e desliza
+        de forma linear ate o alvo mais recente (`semitones`, trocado a
+        qualquer momento via `set_pitch`). Isso da um glide 100% continuo,
+        sem degraus e sem click de fase entre chunks.
+
+        Retorna None quando nao ha mais nada pra tocar (so acontece em sons
+        sem loop, ao chegar no fim da amostra)."""
+        if self.finished or self.n < 2:
+            return None
+        np = _numpy()
+        if np is None:
+            self.finished = True
+            return None
+        if self._cur_semitones is None:
+            self._cur_semitones = self.semitones  # 1o chunk: sem ramp, comeca ja no alvo
+        semi_ramp = np.linspace(self._cur_semitones, self.semitones, self.chunk_samples)
+        ratios = np.clip(2.0 ** (semi_ramp / 12.0), 0.05, 20.0)
+        # posicao de leitura acumulada amostra-a-amostra (integral discreta do
+        # ratio variavel), continuando exatamente de onde `self.pos` parou
+        idx = self.pos + (np.cumsum(ratios) - ratios[0])
+        if self.loop:
+            idx = np.mod(idx, self.n)
+            idx_floor = np.floor(idx).astype(int)
+            idx_ceil = (idx_floor + 1) % self.n
+        else:
+            valid = idx < (self.n - 1)
+            if not np.any(valid):
+                self.finished = True
+                return None
+            if not np.all(valid):
+                cut = int(np.argmax(~valid))
+                idx = idx[:cut]
+                ratios = ratios[:cut]
+                self.finished = True  # esse e o ultimo chunk
+            if idx.shape[0] == 0:
+                return None
+            idx_floor = np.floor(idx).astype(int)
+            idx_ceil = np.minimum(idx_floor + 1, self.n - 1)
+        frac = idx - idx_floor
+        if self.arr.ndim > 1:
+            frac = frac[:, None]
+        chunk = self.arr[idx_floor] * (1.0 - frac) + self.arr[idx_ceil] * frac
+        if not self.finished:
+            self.pos = idx[-1] + ratios[-1]
+            if self.loop:
+                self.pos %= self.n
+            self._cur_semitones = float(semi_ramp[len(ratios) - 1])
+        return chunk
+
+
 def _biquad_peak(np, freq, gain_db, q, sr):
     a = 10 ** (gain_db / 40.0)
     w0 = 2 * math.pi * freq / sr

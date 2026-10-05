@@ -108,15 +108,20 @@ class TweenService(object):
     def cancel(self, obj, key=None):
         self.active = [t for t in self.active if not (t.obj is obj and (key is None or t.key == key))]
 
-    def step(self, dt):
+    def step(self, dt, ui_dt=None):
+        """`dt` = tempo do mundo; `ui_dt` = tempo real (tweens de objetos de
+        UI, ex.: o 'click scale' dos botoes, nao congelam com o mundo)."""
         if not self.active:
             return
+        wt = getattr(self.runtime, "worldtime", None)
+        if ui_dt is None:
+            ui_dt = dt
         still = []
         finished = []
         for t in self.active:
             if not getattr(t.obj, "alive", True):
                 continue
-            t.elapsed += dt
+            t.elapsed += (ui_dt if (wt is not None and wt.is_ui(t.obj)) else dt)
             frac = min(1.0, t.elapsed / t.duration)
             e = t.easing(frac)
             if t.vec:

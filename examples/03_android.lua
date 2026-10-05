@@ -18,3 +18,16 @@ create.button.Tocar = { Text = "Tocar som", Position = {20,260}, Size = {220,60}
 create.button.Salvar = { Text = "Salvar arquivo", Position = {20,340}, Size = {220,60},
   Color = "#1f9d55", Radius = 14,
   OnClick = function() print("gravado:", fs.write("teste.txt", "ola do Lua")) end }
+
+-- Magnetometro (bussola): compassField() da o campo bruto em X/Y/Z (uT),
+-- diferente de compassHeading(), que so entrega o rumo em graus (0-360).
+android.compassStart()
+create.label.Magnet = { Text = "Aguardando sensor...", Position = {20,420}, Size = {320,80},
+  FontSize = 18, TextColor = "cyan" }
+
+onUpdate(function(dt, t)
+  local xyz = android.compassField()
+  if xyz then
+    app.find("Magnet").Text = string.format("X: %.2f\nY: %.2f\nZ: %.2f", xyz.x, xyz.y, xyz.z)
+  end
+end)

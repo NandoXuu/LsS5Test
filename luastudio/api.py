@@ -2,9 +2,11 @@
 """API propria do LuaStudio: objetos, propriedades e a global `create`."""
 
 import math
+import random
 
 from .lua import LuaTable, LuaError, tostring, truthy, as_list, first
 from .vector import Vector2, Vector3, coerce_xyz
+from . import destruction as destruction_mod
 
 # --------------------------------------------------------------- utilidades
 DEFAULT_COLORS = {
@@ -121,11 +123,13 @@ def vec_table(x, y, z=0.0):
 
 
 # ---------------------------------------------------------------- Instance
-CLASSES_2D = ("button", "label", "text", "frame", "image", "slider", "toggle", "particles")
+CLASSES_2D = ("button", "label", "text", "frame", "image", "slider", "toggle",
+              "textbox", "textedit", "codeedit", "canvas",
+              "particles", "tilemap", "obstacle", "destructmesh")
 CLASSES_2D_CAMERA = ("camera2d",)
 CLASSES_2D_LIGHT = ("light2d",)
 CLASSES_3D = ("part", "camera", "light")
-CLASSES_OTHER = ("sound",)
+CLASSES_OTHER = ("sound", "shader", "material", "location", "mask")
 
 
 # apelidos "estilo decorator" (Stroke.Color, Sprite.Image...) mapeados pras
@@ -139,6 +143,12 @@ PROP_ALIASES = {
     "SpriteImage": "SpriteSource",
     "HoverScale": "PressScale",
     "ClickScale": "PressScale",
+    "Title": "Text",
+    "LightRadius": "Range",
+    "LightHeight": "Height",
+    "NormalFlipY": "FlipY",
+    "DebugNormal": "ViewNormal",
+    "NormalIntensity": "NormalStrength",
 }
 
 
@@ -165,8 +175,20 @@ class Instance(object):
             "Color": "#2b6cf6" if cls == "button" else "#00000000",
             "TextColor": "white",
             "Text": name if cls in ("button", "label", "text") else "",
+            # ---- entrada de texto ----
+            "Placeholder": "",
+            "MaxLength": 0.0,       # 0 = sem limite
+            "Password": False,      # mascara TextBox (senha)
+            "Multiline": False,
+            "ReadOnly": False,
+            "OnSubmit": None,       # TextBox: Enter
+            "OnFocus": None,
+            "OnBlur": None,
+            "Focused": False,
             "FontSize": 20.0,
+            "Font": "",             # nome/caminho em assets/fonts (ttf/otf/woff/woff2/svg); "" = fonte padrao
             "ZIndex": 0.0,
+            "RenderLayer": 0.0,
             "Anchor": "topleft",
             "Radius": 12.0,
             "Shape": "cube",
@@ -184,6 +206,13 @@ class Instance(object):
             "OnUpdate": None,
             "OnMouseEnter": None,
             "OnMouseExit": None,
+            # ---- desenho imediato (create.canvas) ----
+            # function(self, draw) chamada todo frame; `draw` expoe
+            # draw.line/rect/rect_outline/circle/ring/arc/polygon/
+            # polyline/text/color - ver luastudio/canvasdraw.py
+            "OnDraw": None,
+            "RichText": False,
+            "OnLinkClick": None,
             # ---- fisica (Stable.Physics / Area2D / CollisionBox) ----
             "Physics": False,
             "Static": False,
@@ -214,6 +243,10 @@ class Instance(object):
             "ShadowBlur": 10.0,
             "ShadowOffset": vec_table(2, 3, 0),
             "Padding": 8.0,
+            "TextEffect": "",       # efeito visual do renderer do TextBox
+            "PlaceholderColor": "#8C93A3",
+            "CursorColor": "white",
+            "SelectionColor": "#4A90E244",
             "SpriteSource": "",
             "SpriteScale": 1.0,
             "SpriteAnchor": "center",
@@ -226,10 +259,49 @@ class Instance(object):
             "IgnoreCamera": False,   # true = desenha fixo na tela (HUD), ignora Camera2D
             "Lit": False,            # true = recebe iluminacao dos create.light2d da cena
             "CastShadow": False,     # true = ocluidor pras sombras 2D e 3D
+            # ---- SUPER CUSTOMIZER: Mask / Shader por elemento / Theme ----
+            "Mask": "",              # nome de um create.mask.X - recorta o desenho deste objeto
+            "Shader": "",            # nome de um create.shader.X - GLSL por elemento (2D)
+            "ShaderParams": None,    # {u_nome = valor} - uniforms so deste elemento
+            "FullScreen": False,     # true = Position {0,0} e Size = tamanho atual do Stage, todo frame
+            "ShaderMode": "",        # "object" | "screen" - "screen" faz o shader ler o que ja foi desenhado atras
+            "Theme": "",             # nome de um tema registrado via UI.Theme(...)
+            "Style": None,           # {Normal=,Hover=,Pressed=,Disabled=,Focused={Prop=Valor,...}}
+            "Disabled": False,       # estado visual (Style.Disabled) - nao bloqueia clique sozinho
+            "AnchorOffset": vec_table(0, 0, 0),  # deslocamento em pixels quando Anchor = {Left=,Top=}
         }
+        # props que o script setou explicitamente (por Instance ou por spec
+        # em create.<classe>.X = {...}) - um Theme so preenche o que o
+        # usuario NUNCA tocou; o que foi setado a mao sempre vence.
+        self._explicit_keys = set()
         # ajustes por classe
         if cls == "label" or cls == "text":
             self.props["Color"] = "#00000000"
+        if cls == "textbox":
+            self.props.update({
+                "Color": "#20242c",
+                "TextColor": "white",
+                "Size": vec_table(240, 44, 1),
+                "Radius": 8.0,
+                "Multiline": False,
+            })
+        if cls == "textedit":
+            self.props.update({
+                "Color": "#20242c",
+                "TextColor": "white",
+                "Size": vec_table(360, 180, 1),
+                "Radius": 8.0,
+                "Multiline": True,
+            })
+        if cls == "codeedit":
+            self.props.update({
+                "Color": "#15181e",
+                "TextColor": "white",
+                "Size": vec_table(480, 260, 1),
+                "Radius": 6.0,
+                "Multiline": True,
+                "FontSize": 15.0,
+            })
         if cls == "part":
             self.props["Position"] = vec_table(0, 0, 0)
             self.props["Size"] = vec_table(1, 1, 1)
@@ -245,7 +317,23 @@ class Instance(object):
                 "Shininess": 32.0, "Specular": 0.35, "Rim": 0.0,
             })
         if cls == "image":
-            self.props["Loop"] = True
+            self.props.update({
+                "Loop": True, "NormalMap": "", "Filter": "linear",
+                "NormalStrength": 2.0, "FlipY": False, "ViewNormal": False,
+                "Albedo": 1.0, "Roughness": 0.5, "Specular": 0.5,
+                "Metallic": 0.0, "Emission": 0.0, "AO": 1.0, "Ambient": None,
+            })
+        if cls == "mask":
+            # Shape: rectangle | roundedrectangle | circle | ellipse | text |
+            # sprite | texture | alpha (source de imagem) - ver stage._render_mask.
+            # Position/Size definem a REGIAO da mascara no mesmo espaco (Lua,
+            # y pra baixo) usado por qualquer outro objeto; um `image.Mask =
+            # "NomeDaMascara"` so aparece onde essa regiao E onde a imagem
+            # em si estiver desenhada (interseccao dos dois).
+            self.props.update({
+                "Shape": "rectangle", "Text": "", "FontSize": 48.0,
+                "Source": "",
+            })
         if cls == "particles":
             self.props.update({
                 "Rate": 20.0, "Emitting": True, "MaxParticles": 200,
@@ -257,6 +345,15 @@ class Instance(object):
             })
             self._particles = []
             self._emit_acc = 0.0
+        if cls == "tilemap":
+            self.props.update({
+                # caminho pro arquivo do mapa (.lsm ou .JsonTm), gerado pelo
+                # Editor de Tilemaps (app separado) - resolvido do mesmo
+                # jeito que Source de create.image (relativo aos assets do
+                # projeto). O tileset (imagem) e lido AUTOMATICAMENTE do
+                # nome gravado dentro do proprio arquivo do mapa.
+                "File": "",
+            })
         if cls == "camera2d":
             self.props.update({
                 "Position": vec_table(0, 0, 0),
@@ -272,6 +369,26 @@ class Instance(object):
             self._shake_time = 0.0
             self._shake_total = 0.0
             self._shake_mag = 0.0
+        if cls == "destructmesh":
+            self.props.update({
+                "Source": "", "Fragments": 24.0, "Exploded": False,
+                "Lifetime": 4.0, "Bounce": 0.25, "Friction": 0.2,
+            })
+            self._mesh_vertices = []
+            self._mesh_uvs = []
+            self._mesh_tris = []
+            self._mesh_pieces = []
+            self._render_tris = []
+            self._fragments = []
+        if cls == "meshfragment":
+            self.props.update({
+                "Physics": True, "Collidable": True, "UseGravity": True,
+                "Bounce": 0.25, "Friction": 0.2, "Lifetime": 4.0, "Age": 0.0,
+                "AngularVelocity": 0.0,
+            })
+            self._render_tris = []
+        if cls == "location":
+            self.props.update({"Margin": 24.0})
         if cls == "light2d":
             self.props.update({
                 "Position": vec_table(0, 0, 0),
@@ -280,6 +397,7 @@ class Instance(object):
                 "Color": "white",
                 "Intensity": 1.0,
                 "Range": 220.0,
+                "Height": 100.0,
                 "SpotAngle": 45.0,
                 "CastShadow": False,
                 "Enabled": True,
@@ -311,8 +429,12 @@ class Instance(object):
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             value = safe_float(value)
         self.props[key] = value
+        self._explicit_keys.add(key)
         if key == "Name":
             self.scene.rename(self, tostring(value))
+        if self.cls in ("shader", "material"):
+            from . import glsl as glsl_mod
+            glsl_mod.sync_instance(self)
         self.scene.dirty = True
 
     def apply(self, spec):
@@ -366,6 +488,61 @@ class Instance(object):
     def text_color(self):
         return to_color(self.props.get("TextColor"), (1, 1, 1, 1))
 
+    # -------- Theme / Style (SUPER CUSTOMIZER) --------
+    # alias generico Prop -> chave em theme.Colors, usado quando o tema nao
+    # tem uma tabela especifica pra classe (ex: theme.Button.Color)
+    _THEME_COLOR_ALIAS = {"BorderColor": "Border", "TextColor": "Text"}
+
+    def themed_value(self, key, state="Normal"):
+        """Valor efetivo de `key` levando em conta Theme + Style (estado
+        atual: Normal/Hover/Pressed/Disabled/Focused). Uma prop que o script
+        setou explicitamente (`self._explicit_keys`) sempre vence o Theme -
+        so o Style (que representa um ESTADO de interacao, nao um valor
+        estatico) pode sobrepor mesmo uma prop explicita."""
+        from . import uitheme
+        base = self.props.get(key)
+        if key not in self._explicit_keys:
+            theme_name = self.props.get("Theme")
+            theme = uitheme.THEMES.get(theme_name) if theme_name else None
+            if isinstance(theme, LuaTable):
+                cls_table = theme.get(self.cls.capitalize())
+                val = cls_table.get(key) if isinstance(cls_table, LuaTable) else None
+                if val is None:
+                    if key == "Color":
+                        colors = theme.get("Colors")
+                        alias = "Primary" if self.cls in ("button",) else "Background"
+                        val = colors.get(alias) if isinstance(colors, LuaTable) else None
+                    elif key in self._THEME_COLOR_ALIAS:
+                        colors = theme.get("Colors")
+                        val = (colors.get(self._THEME_COLOR_ALIAS[key])
+                               if isinstance(colors, LuaTable) else None)
+                    elif key == "Font":
+                        val = theme.get("Font")
+                if val is not None:
+                    base = val
+        style = self.props.get("Style")
+        if isinstance(style, LuaTable):
+            state_table = style.get(state)
+            if isinstance(state_table, LuaTable) and state_table.get(key) is not None:
+                base = state_table.get(key)
+        return base
+
+    def themed_color(self, key="Color", state="Normal", default=(0.2, 0.4, 0.9, 1)):
+        return to_color(self.themed_value(key, state), default)
+
+    def themed_opacity(self, state="Normal"):
+        """Multiplicador de opacidade vindo de Style.<Estado>.Opacity (ex:
+        Disabled = {Opacity = 0.4}). 1.0 se nao houver Style/estado."""
+        style = self.props.get("Style")
+        if isinstance(style, LuaTable):
+            state_table = style.get(state)
+            if isinstance(state_table, LuaTable) and state_table.get("Opacity") is not None:
+                try:
+                    return max(0.0, min(1.0, float(state_table.get("Opacity"))))
+                except (TypeError, ValueError):
+                    return 1.0
+        return 1.0
+
     def visible(self):
         return truthy(self.props.get("Visible"))
 
@@ -397,11 +574,76 @@ class Instance(object):
         else:
             self.set_prop("Rotation", self.rot() + float(d or 0))
 
+    def m_LayerMove(self, _self=None, n=0):
+        self.set_prop("RenderLayer", float(int(n if n is not None else 0)))
+        return self
+
+    def m_GetConnectionPoints(self, _self=None, target=None):
+        from . import pathfinding as pathfinding_mod
+        sx, sy, _sz = self.pos()
+        if target is None:
+            target = self.props.get("Target")
+        tx, ty, _tz = to_vec(target, (sx, sy, 0.0))
+        margin = float(self.props.get("Margin") or 24.0)
+        obstacles = []
+        for o in self.scene.objects:
+            if o.alive and o.cls == "obstacle":
+                ox, oy, _oz = o.pos()
+                ow, oh, _od = o.eff_size()
+                obstacles.append((ox, oy, ox + ow, oy + oh))
+        points = pathfinding_mod.find_path((sx, sy), (tx, ty), obstacles, margin)
+        t = LuaTable()
+        for i, (px, py) in enumerate(points):
+            t.set(float(i + 1), vec_table(px, py, 0.0))
+        return t
+
     def m_SetText(self, _self=None, txt=""):
         self.set_prop("Text", tostring(txt))
 
+    def m_SetFont(self, _self=None, font=""):
+        """obj:SetFont("minhafonte.ttf") - troca a fonte do texto; o
+        arquivo e procurado em assets/fonts/ do projeto. Aceita
+        .ttf/.otf/.woff/.woff2/.svg (fonte SVG legada)."""
+        self.set_prop("Font", tostring(font))
+
+    def m_ReFont(self, _self=None, font=""):
+        """Mesma coisa que SetFont (nome alternativo)."""
+        self.set_prop("Font", tostring(font))
+
     def m_SetColor(self, _self=None, c=None):
         self.set_prop("Color", c)
+
+    def m_SetShader(self, _self=None, name=None):
+        self.set_prop("Shader", tostring(name) if name else "")
+
+    def m_SetUniform(self, _self=None, name=None, value=None):
+        from . import glsl as glsl_mod
+        if self.cls == "shader":
+            glsl_mod.SHADERS.set_uniform(self.name, tostring(name), value)
+        else:
+            self.m_SetShaderUniform(None, name, value)
+        self.scene.dirty = True
+
+    def m_SetUniforms(self, _self=None, tbl=None):
+        if isinstance(tbl, LuaTable):
+            for k, v in tbl.items():
+                if isinstance(k, str):
+                    self.m_SetUniform(None, k, v)
+
+    def m_GetUniform(self, _self=None, name=None):
+        from . import glsl as glsl_mod
+        if self.cls == "shader":
+            return glsl_mod.SHADERS.get_uniform(self.name, tostring(name))
+        params = self.props.get("ShaderParams")
+        return params.get(tostring(name)) if isinstance(params, LuaTable) else None
+
+    def m_SetShaderUniform(self, _self=None, name=None, value=None):
+        params = self.props.get("ShaderParams")
+        if not isinstance(params, LuaTable):
+            params = LuaTable()
+            self.props["ShaderParams"] = params
+        params.set(tostring(name), value)
+        self.scene.dirty = True
 
     def m_Show(self, *_a):
         self.set_prop("Visible", True)
@@ -596,6 +838,82 @@ class Instance(object):
             return (float(l or 0), float(r or 0), float(t or 0), float(b or 0))
         v = float(p or 0)
         return (v, v, v, v)
+
+    def m_cut(self, _self=None, spec=None):
+        if self.cls != "destructmesh" or not isinstance(spec, LuaTable):
+            return self
+        if not self._mesh_tris:
+            destruction_mod.build_instance_mesh(self, self.scene.runtime.resolve)
+        ox, oy, _ = self.pos()
+        x1, y1, _ = to_vec(spec.get("From"), (0, 0, 0))
+        x2, y2, _ = to_vec(spec.get("To"), (0, 0, 0))
+        self._mesh_pieces = destruction_mod.cut_pieces(
+            self._mesh_vertices, self._mesh_tris, self._mesh_pieces,
+            x1 - ox, y1 - oy, x2 - ox, y2 - oy)
+        return self
+
+    def m_separate(self, _self=None, spec=None):
+        if self.cls != "destructmesh":
+            return self
+        if not self._mesh_tris:
+            destruction_mod.build_instance_mesh(self, self.scene.runtime.resolve)
+        self._mesh_pieces = [[i] for i in range(len(self._mesh_tris))]
+        return self.m_explode(_self, spec)
+
+    def m_fragmentCount(self, *_a):
+        return float(len(getattr(self, "_fragments", [])))
+
+    def m_explode(self, _self=None, spec=None):
+        if self.cls != "destructmesh" or truthy(self.props.get("Exploded")):
+            return self
+        if not self._mesh_tris:
+            destruction_mod.build_instance_mesh(self, self.scene.runtime.resolve)
+        if not self._mesh_pieces:
+            return self
+        ox, oy, _ = self.pos()
+        w, h, _ = self.eff_size()
+        force = 400.0
+        torque = 220.0
+        lifetime = float(self.props.get("Lifetime") or 4.0)
+        center_x, center_y = ox + w / 2.0, oy + h / 2.0
+        if isinstance(spec, LuaTable):
+            force = float(spec.get("Force") or force)
+            torque = float(spec.get("Torque") or torque)
+            px, py, _ = to_vec(spec.get("Position"), (center_x, center_y, 0))
+            center_x, center_y = px, py
+            if spec.get("Lifetime") is not None:
+                lifetime = float(spec.get("Lifetime"))
+        self.props["Exploded"] = True
+        self.set_prop("Visible", False)
+        src = str(self.props.get("Source") or "")
+        bounce = float(self.props.get("Bounce") or 0.25)
+        friction = float(self.props.get("Friction") or 0.2)
+        self._fragments = []
+        for idx, tri_indices in enumerate(self._mesh_pieces):
+            geo = destruction_mod.piece_box(self._mesh_vertices, self._mesh_tris,
+                                            self._mesh_uvs, tri_indices)
+            if geo is None:
+                continue
+            bx, by, bw, bh, render_tris = geo
+            wx, wy = ox + bx, oy + by
+            cx, cy = wx + bw / 2.0, wy + bh / 2.0
+            ddx, ddy = cx - center_x, cy - center_y
+            dist = math.hypot(ddx, ddy) or 1.0
+            nx, ny = ddx / dist, ddy / dist
+            frag = self.scene.create("meshfragment", "%s_frag_%d" % (self.name, idx))
+            frag.props["Source"] = src
+            frag.props["Position"] = vec_table(wx, wy, 0)
+            frag.props["Size"] = vec_table(bw, bh, 1)
+            frag.props["Bounce"] = bounce
+            frag.props["Friction"] = friction
+            frag.props["Velocity"] = vec_table(
+                nx * force * random.uniform(0.6, 1.0),
+                ny * force * random.uniform(0.6, 1.0) - force * 0.2, 0)
+            frag.props["Lifetime"] = lifetime
+            frag.props["AngularVelocity"] = random.uniform(-torque, torque)
+            frag._render_tris = render_tris
+            self._fragments.append(frag)
+        return self
 
     def m_Play(self, _self=None, *a):
         if self.cls == "sound":
