@@ -1,3 +1,8 @@
+-- Shader com ShaderMode = "screen" (ou Screen = true no create.shader):
+--   sampleScreen(uv) / sampleBehind() / uScreenTexture  -> o que ja foi desenhado atras (uv de tela, 0..1)
+--   vScreenUV  -> uv de tela do pixel atual;  uScreenSize / uObjectSize / uObjectPosition em pixels
+--   sampleObject(vLocalUV) / sampleContent(vLocalUV)    -> o proprio objeto
+-- (se o shader nao usar nenhum nome acima, sampleContent(uv) le a tela, como nos shaders antigos)
 app.background("#0e1220")
 
 create.shader.VidroPixel = {
@@ -10,7 +15,7 @@ void main(void)
     vec4 obj = sampleObject(vLocalUV);
     vec2 cell = vec2(max(u_pixel, 1.0)) / uScreenSize;
     vec2 uv = (floor(vScreenUV / cell) + 0.5) * cell;
-    vec3 behind = sampleContent(uv).rgb;
+    vec3 behind = sampleScreen(uv).rgb;
     gl_FragColor = vec4(mix(behind, obj.rgb, obj.a * u_opacity), obj.a);
 }
 ]],
@@ -61,7 +66,7 @@ create.shader.Escurecer = {
   Fragment = [[
 void main(void)
 {
-    gl_FragColor = vec4(sampleContent(vScreenUV).rgb * 0.5, 1.0);
+    gl_FragColor = vec4(sampleScreen(vScreenUV).rgb * 0.5, 1.0);
 }
 ]],
 }

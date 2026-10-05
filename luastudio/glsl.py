@@ -232,8 +232,10 @@ vec4 sampleObject(vec2 local)
 }
 vec4 sampleContent(vec2 local)
 {
+#ifdef LS_CONTENT_IS_SCREEN
     if (uScreenOn > 0.5)
         return sampleScreen(local);
+#endif
     return sampleObject(local);
 }
 """
@@ -249,9 +251,24 @@ void main(void)
 """
 
 
+_SCREEN_API = ("sampleScreen", "sampleBehind", "sampleObject", "uScreenTexture", "vScreenUV",
+               "uScreenSize", "uObjectSize", "uObjectPosition")
+
+
+def uses_screen_api(user_src):
+    """True se o GLSL usa qualquer nome da API de tela (sampleScreen,
+    sampleBehind, uScreenTexture, vScreenUV...). Nesse caso `sampleContent`
+    e SEMPRE o conteudo do proprio objeto e a tela e lida pela API nova.
+    Sem nenhum desses nomes, um shader de modo screen mantem o contrato
+    antigo: `sampleContent(uv)` le o que esta atras, em UV de tela."""
+    return any(re.search(r"\b%s\b" % n, user_src) for n in _SCREEN_API)
+
+
 def _ui_header(user_src):
     declared = _declared_names(user_src)
     lines = []
+    if not uses_screen_api(user_src):
+        lines.append("#define LS_CONTENT_IS_SCREEN")
     if not any(n in declared for n in AUTO_TIME):
         lines.append("uniform float uTime;")
     if not any(n in declared for n in AUTO_RES):

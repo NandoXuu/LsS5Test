@@ -42,6 +42,12 @@ class ScreenShaderTest(unittest.TestCase):
         self.assertTrue(rt.run_source("F = create.frame.F{ FullScreen = true, ShaderMode = 'screen' }"))
         self.assertTrue(rt.scene.by_name["F"].props.get("FullScreen"))
 
+    def test_contrato_sample_content(self):
+        glsl_mod.SHADERS.register("Leg", "void main(void){gl_FragColor=sampleContent(vec2(0.5));}", screen=True)
+        glsl_mod.SHADERS.register("Novo", "void main(void){gl_FragColor=sampleContent(vLocalUV)*sampleBehind();}", screen=True)
+        self.assertIn("#define LS_CONTENT_IS_SCREEN", glsl_mod.SHADERS.program_2d("Leg").fs)
+        self.assertNotIn("#define LS_CONTENT_IS_SCREEN", glsl_mod.SHADERS.program_2d("Novo").fs)
+
     def test_declaracao_do_usuario_nao_duplica(self):
         glsl_mod.SHADERS.register("U", "uniform sampler2D uScreenTexture;\nvoid main(void){gl_FragColor=sampleBehind();}\n")
         fs = glsl_mod.SHADERS.program_2d("U").fs

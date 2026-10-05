@@ -81,6 +81,7 @@ class Stage(StencilView):
         self._screen_fbos = {}     # indice da etapa -> Fbo (backbuffer do modo ShaderMode="screen")
         self._screen_src = None    # textura do que ja foi desenhado ate a etapa atual
         self._screen_warned = set()
+        self._layer_depth = 0      # >0 enquanto desenha dentro do Fbo de uma Layer
         self._text_inputs = {}
         self._text_input_updating = set()
         self.bind(size=lambda *a: self.redraw(), pos=lambda *a: self.redraw())
@@ -489,7 +490,7 @@ class Stage(StencilView):
             self.runtime.log("[erro no render 2D] %s: %s" % (type(ex).__name__, ex))
 
     # ------------------------------------------------ ShaderMode = "screen"
-    MAX_SCREEN_PASSES = 8
+    MAX_SCREEN_PASSES = 16
 
     def _screen_mode(self, obj):
         """True se o shader deste objeto precisa ler o que ja foi desenhado
@@ -960,6 +961,7 @@ class Stage(StencilView):
         fbo.clear()
         parent = self._out
         self._out = fbo
+        self._layer_depth += 1
         try:
             with fbo:
                 PushMatrix()
@@ -967,6 +969,7 @@ class Stage(StencilView):
                 self._draw_objs_with_camera(layer_objs, cam)
                 PopMatrix()
         finally:
+            self._layer_depth -= 1
             self._out = parent
         parent.add(fbo)
         opacity = max(0.0, min(1.0, float(state.get("opacity", 1.0))))
@@ -1041,9 +1044,9 @@ class Stage(StencilView):
             values[uname] = index
             extras.append((tex, index))
             index += 1
-        if screen_tex is not None and "uScreenTexture" in prog.types:
+        if "uScreenTexture" in prog.types:
             values["uScreenTexture"] = index
-            extras.append((screen_tex, index))
+            extras.append((screen_tex if screen_tex is not None else texture, index))
             index += 1
         if entry.wrap:
             try:
@@ -1427,7 +1430,8 @@ class Stage(StencilView):
         if shader_name:
             params = obj.props.get("ShaderParams")
             overrides = glsl_mod._table_to_dict(params) if params is not None else None
-            screen_tex = self._screen_src if self._screen_mode(obj) else None
+            screen_tex = (self._screen_src
+                          if self._layer_depth == 0 and self._screen_mode(obj) else None)
             rc = self._compose_shader(("obj", obj.name), shader_name, fbo.texture, (sx, sy), (w, h),
                                       tex_coords=tex_coords, resolution=(w, h), color=obj.color(),
                                       overrides=overrides, mask_tex=mask_tex,
