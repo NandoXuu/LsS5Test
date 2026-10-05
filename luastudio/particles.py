@@ -66,11 +66,7 @@ class ParticleSystem(object):
             "c1": c1, "c2": c2,
         })
 
-    def step(self, dt, ui_dt=None):
-        world_dt = dt
-        wt = getattr(self.runtime, "worldtime", None)
-        if ui_dt is None:
-            ui_dt = dt
+    def step(self, dt):
         gx_default, gy_default, _ = self.runtime.physics.gravity
         for obj in self.runtime.scene.objects:
             if obj.cls != "particles" or not obj.alive:
@@ -78,7 +74,6 @@ class ParticleSystem(object):
             if not hasattr(obj, "_particles"):
                 obj._particles = []
                 obj._emit_acc = 0.0
-            dt = ui_dt if (wt is not None and wt.is_ui(obj)) else world_dt
 
             if truthy(obj.props.get("Emitting", True)):
                 rate = float(obj.props.get("Rate") or 20.0)

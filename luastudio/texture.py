@@ -36,7 +36,6 @@ class TextureManager(object):
         self.resolver = resolver          # funcao source -> caminho absoluto
         self.log = log or (lambda s: None)
         self._cache = {}                  # (path, filter, wrap) -> Texture
-        self._failed = set()              # paths que falharam (loga so 1 vez)
         self._batch_pending = {}          # path -> set(filtros pedidos no frame)
         self.stats = {"uploads": 0, "hits": 0, "batched": 0}
 
@@ -50,12 +49,6 @@ class TextureManager(object):
         if mipmap is None:
             mipmap = fmode in (FILTER_TRILINEAR, FILTER_NEAREST_MIPMAP)
         key = (path, fmode, bool(wrap))
-        if path in self._failed:
-            # so tenta de novo se o arquivo apareceu (ex.: import de asset)
-            import os
-            if not os.path.isfile(path):
-                return None
-            self._failed.discard(path)
         cached = self._cache.get(key)
         if cached is not None:
             self.stats["hits"] += 1
@@ -75,8 +68,7 @@ class TextureManager(object):
             tex.min_filter = fmode
             tex.wrap = "repeat" if wrap else "clamp_to_edge"
         except Exception as ex:
-            self._failed.add(path)
-            self.log("[textura] falha ao carregar %s (%s): %s" % (source, path, ex))
+            self.log("[textura] falha ao carregar %s: %s" % (source, ex))
             return None
         self._cache[key] = tex
         return tex
@@ -89,5 +81,4 @@ class TextureManager(object):
 
     def clear(self):
         self._cache.clear()
-        self._failed.clear()
         self.stats = {"uploads": 0, "hits": 0, "batched": 0}

@@ -46,7 +46,6 @@ class Audio(object):
         self._processed_cache = {}      # (path, dsp_signature) -> Sound processado
         self.channels = {}              # nome do objeto -> Channel
         self.mixer_bus = dsp.Mixer(self.log)
-        self.live_pitch = {}            # nome do objeto -> estado do pitch ao vivo
         self.listener_pos = (0.0, 0.0, 0.0)
         self.listener_forward = (0.0, 0.0, 1.0)
         self.listener_vel = (0.0, 0.0, 0.0)
@@ -70,14 +69,7 @@ class Audio(object):
         if os.path.isabs(source) and os.path.exists(source):
             return source
         p = os.path.join(self.base_dir, source)
-        if os.path.exists(p):
-            return p
-        from . import pathutil
-        found = pathutil.find_asset(os.path.abspath(self.base_dir), source)
-        if not found:
-            self.log("[audio] nao encontrei \"%s\" - Source: %s"
-                     % (source, pathutil.describe_source(self.base_dir)))
-        return found
+        return p if os.path.exists(p) else None
 
     def load(self, source):
         mixer = self.mixer
@@ -192,8 +184,6 @@ class Audio(object):
                 pass
         if inst.name in self.hrtf_sources:
             self._stop_hrtf2d_name(inst.name)
-        if inst.name in self.live_pitch:
-            self.stop_live_pitch(inst)
 
     def stop_all(self):
         if _mixer is not None:
@@ -203,112 +193,6 @@ class Audio(object):
                 pass
         self.channels.clear()
         self.hrtf_sources.clear()
-        self.live_pitch.clear()
-
-    # ------------------------------------------------- pitch ao vivo (streaming)
-    def play_live_pitch(self, inst, bus="SFX", start_pitch=0.0, chunk_ms=45.0):
-        """Toca o som num canal dedicado, alimentado em pequenos pedacos
-        (chunks) via Channel.queue(), com a taxa de leitura controlada
-        pelo pitch atual. `set_live_pitch()` pode trocar o pitch a
-        qualquer momento, inclusive com o som tocando, sem pausa/corte —
-        ideal pra sirene, vibrato, glide, efeitos tipo 'onda' etc."""
-        if not self.ready:
-            self.log("[audio] playLivePitch ignorado (mixer off): %s" % inst.name)
-            return
-        source = str(inst.props.get("Source") or "")
-        base_snd = self.load(source)
-        if base_snd is None:
-            return
-        arr = dsp.sound_to_array(base_snd)
-        if arr is None:
-            self.log("[audio] playLivePitch precisa de numpy (nao encontrado); "
-                     "tocando %s sem pitch ao vivo" % inst.name)
-            self.play(inst, bus=bus)
-            return
-        self.stop_live_pitch(inst)
-        try:
-            init = self.mixer.get_init()
-            rate = init[0] if init else 44100
-        except Exception:
-            rate = 44100
-        chunk_samples = max(128, int(rate * float(chunk_ms) / 1000.0))
-        loop = bool(inst.props.get("Loop"))
-        voice = dsp.LivePitchStream(arr, loop=loop, chunk_samples=chunk_samples)
-        voice.set_pitch(start_pitch)
-
-        first = voice.next_chunk()
-        if first is None:
-            return
-        first_snd = dsp.array_to_sound(first, self.log)
-        if first_snd is None:
-            return
-        try:
-            channel = self.mixer.find_channel(True)
-            if channel is None:
-                self.log("[audio] sem canal livre pra playLivePitch: %s" % inst.name)
-                return
-            self.mixer_bus.route(inst.name, bus)
-            src_vol = float(inst.props.get("Volume") or 1.0)
-            channel.set_volume(self.mixer_bus.resolve_volume(inst.name, src_vol))
-            channel.play(first_snd)
-            nxt = voice.next_chunk()
-            if nxt is not None:
-                nxt_snd = dsp.array_to_sound(nxt, self.log)
-                if nxt_snd is not None:
-                    channel.queue(nxt_snd)
-        except Exception as ex:
-            self.log("[audio] erro ao iniciar playLivePitch: %s" % ex)
-            return
-        self.live_pitch[inst.name] = {"voice": voice, "channel": channel}
-
-    def set_live_pitch(self, inst, semitones):
-        """Muda o pitch (em semitons) de um som ja tocando com
-        playLivePitch, em tempo real e sem interromper o audio."""
-        st = self.live_pitch.get(inst.name)
-        if st is not None:
-            st["voice"].set_pitch(semitones)
-
-    def update_live_pitch(self, name):
-        """Alimenta o canal com o proximo chunk quando a fila esvazia.
-        Chame a cada frame (ja plugado no loop do runtime) — se nao for
-        chamado com frequencia suficiente (mais rapido que chunk_ms), o
-        audio pode gaguejar por falta de dado na fila."""
-        st = self.live_pitch.get(name)
-        if st is None:
-            return
-        ch = st["channel"]
-        voice = st["voice"]
-        try:
-            queued = ch.get_queue()
-            busy = ch.get_busy()
-        except Exception:
-            queued, busy = None, False
-        if queued is None and not voice.finished:
-            chunk = voice.next_chunk()
-            if chunk is not None:
-                snd = dsp.array_to_sound(chunk, self.log)
-                if snd is not None:
-                    try:
-                        ch.queue(snd)
-                    except Exception:
-                        pass
-        if voice.finished and queued is None and not busy:
-            self.live_pitch.pop(name, None)
-
-    def update_live_pitch_all(self, dt):
-        if not self.live_pitch:
-            return
-        for name in list(self.live_pitch.keys()):
-            self.update_live_pitch(name)
-
-    def stop_live_pitch(self, inst):
-        name = inst.name if hasattr(inst, "name") else inst
-        st = self.live_pitch.pop(name, None)
-        if st is not None:
-            try:
-                st["channel"].stop()
-            except Exception:
-                pass
 
     # ---------------------------------------------------------- HRTF 2D
     def set_camera2d(self, position=None, zoom=None):

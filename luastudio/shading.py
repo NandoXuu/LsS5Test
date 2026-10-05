@@ -13,7 +13,6 @@ import math
 
 from . import render3d as r3d
 from . import lighting as light_mod
-from . import glsl as glsl_mod
 
 SPECULAR_DEFAULT = 0.35
 RIM_DEFAULT = 0.0
@@ -92,11 +91,9 @@ def approx_ao(face_normal, mesh_faces_normals):
 
 # ------------------------------------------------------------- G-Buffer
 class GBufferEntry(object):
-    __slots__ = ("points", "depth", "pos", "normal", "albedo", "material", "obj", "face_idx",
-                 "world", "uv", "tangent")
+    __slots__ = ("points", "depth", "pos", "normal", "albedo", "material", "obj", "face_idx")
 
-    def __init__(self, points, depth, pos, normal, albedo, material, obj, face_idx=0,
-                 world=None, uv=None, tangent=None):
+    def __init__(self, points, depth, pos, normal, albedo, material, obj, face_idx=0):
         self.points = points
         self.depth = depth
         self.pos = pos
@@ -105,9 +102,6 @@ class GBufferEntry(object):
         self.material = material
         self.obj = obj
         self.face_idx = face_idx
-        self.world = world      # posicoes 3D dos vertices da face (mesma ordem de `points`)
-        self.uv = uv            # UV sintetico por vertice (mesma ordem)
-        self.tangent = tangent  # tangente constante da face (pra normal mapping)
 
 
 def build_gbuffer(parts, camera, width, height):
@@ -160,12 +154,8 @@ def build_gbuffer(parts, camera, width, height):
             pts = [(width * 0.5 + p[0] * f / p[2], height * 0.5 + p[1] * f / p[2]) for p in pts_view]
             depth = sum(p[2] for p in pts_view) / len(pts_view)
             ao = approx_ao(normal, face_normals)
-            face_world = [world[i] for i in f2]
-            face_uv = glsl_mod.face_uv(len(f2), mirrored=mirrored)
-            face_tan = glsl_mod.face_tangent(face_world, face_uv)
             gbuf.append(GBufferEntry(pts, depth, centroid, normal, base_color,
-                                     {"shader": material, "ao": ao, "view_dir": to_cam}, inst, idx,
-                                     world=face_world, uv=face_uv, tangent=face_tan))
+                                     {"shader": material, "ao": ao, "view_dir": to_cam}, inst, idx))
     return gbuf
 
 
