@@ -19,6 +19,8 @@ from kivy.uix.popup import Popup
 from kivy.uix.textinput import TextInput
 from kivy.utils import get_color_from_hex
 
+from . import softkeyboard
+
 # ---------------------------------------------------------------- paleta
 BG = (0.067, 0.067, 0.075, 1)          # fundo geral da janela
 SURFACE = (0.098, 0.098, 0.110, 1)     # paineis (toolbar, cards, barra de simbolos)
@@ -130,8 +132,10 @@ def make_input(**kw):
     kw.setdefault("selection_color", ACCENT[:3] + (0.35,))
     kw.setdefault("padding", (14, 14, 14, 14))
     kw.setdefault("font_size", 16)
-    return _build_tolerant(TextInput, ("hint_text_color", "background_disabled_normal",
-                                       "selection_color"), **kw)
+    ti = _build_tolerant(TextInput, ("hint_text_color", "background_disabled_normal",
+                                     "selection_color"), **kw)
+    softkeyboard.bind_textinput(ti)
+    return ti
 
 
 def paint_rounded(widget, color=SURFACE, radius=14, border=None, border_w=1):

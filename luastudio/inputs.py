@@ -12,8 +12,11 @@ Convencoes:
 """
 
 import math
+import time
 from collections import deque
 
+PAD_BACK_GRACE = 0.4        # s: teclas ESC/ENTER logo apos botao de controle = fallback do Android
+FALLBACK_KEYS = ("ESCAPE", "ENTER")
 HAT_UP_IS_POSITIVE = True   # Kivy: hat (x, y) com y=+1 pra cima
 
 # ------------------------------------------------------------- teclado
@@ -216,6 +219,7 @@ class Pad(object):
 
     def raw_button(self, raw, on):
         raw = int(raw)
+        self.mgr.pad_stamp = self.mgr.clock()
         if on:
             self.raw_buttons.add(raw)
         else:
@@ -225,6 +229,7 @@ class Pad(object):
             self._set(name, "b", on)
 
     def native_button(self, name, on, code):
+        self.mgr.pad_stamp = self.mgr.clock()
         if on:
             self.raw_buttons.add(code)
         else:
@@ -238,6 +243,7 @@ class Pad(object):
         x = int(_clamp(x or 0, -1, 1))
         y = int(_clamp(y or 0, -1, 1))
         self.hat = (x, y)
+        self.mgr.pad_stamp = self.mgr.clock()
         self.mgr.last_raw = {"type": "hat", "pad": self.id, "id": 0, "value": float(x * 10 + y)}
         up = y > 0 if HAT_UP_IS_POSITIVE else y < 0
         dn = y < 0 if HAT_UP_IS_POSITIVE else y > 0
@@ -366,6 +372,13 @@ class InputManager(object):
         self.slots = {}
         self.cfg_ops = []
         self.seq = 0
+        self.key_flags = []
+        self.frame = 0
+        self.clock = time.monotonic
+        self.pad_stamp = -1e9
+
+    def pad_recent(self, grace=PAD_BACK_GRACE):
+        return (self.clock() - self.pad_stamp) < grace
 
     # --- util
     def _emit(self, kind, *args):
@@ -452,7 +465,7 @@ class InputManager(object):
         slot = self.slots.get(ext)
         if slot is None:
             used = set(self.slots.values())
-            slot = next(i for i in range(256) if i not in used)
+            slot = next((i for i in range(256) if i not in used), 255)
             self.slots[ext] = slot
         return self.pad(slot, real=True)
 
@@ -618,7 +631,12 @@ class InputManager(object):
         return best
 
     # --- ciclo
+    def tick_flags(self):
+        for f in self.key_flags:
+            f.poll()
+
     def end_frame(self):
+        self.frame += 1
         self.keys_pressed.clear()
         self.keys_released.clear()
         self.mouse_pressed.clear()
@@ -632,6 +650,9 @@ class InputManager(object):
         self.mouse_down_set.clear()
         self.last_key = None
         self.native_queue.clear()
+        self.pad_stamp = -1e9
+        for f in self.key_flags:
+            f.reset()
         for p in self.pads.values():
             p.reset_state()
         self.end_frame()
@@ -641,6 +662,7 @@ class InputManager(object):
         self.reset_state()
         self.actions.clear()
         self.axis_actions.clear()
+        self.key_flags = []
         self.cfg_ops = []
         for p in self.pads.values():
             p.reset_config()
@@ -675,6 +697,7 @@ class KivyBridge(object):
         if self.window is None or self.attached:
             return
         try:
+            self.window.bind(on_keyboard=self._keyboard)
             self.window.bind(on_key_down=self._key_down, on_key_up=self._key_up,
                              on_joy_button_down=self._jb_down, on_joy_button_up=self._jb_up,
                              on_joy_axis=self._jaxis, on_joy_hat=self._jhat)
@@ -693,6 +716,10 @@ class KivyBridge(object):
         if self.window is None or not self.attached:
             return
         try:
+            self.window.unbind(on_keyboard=self._keyboard)
+        except Exception:
+            pass
+        try:
             self.window.unbind(on_key_down=self._key_down, on_key_up=self._key_up,
                                on_joy_button_down=self._jb_down, on_joy_button_up=self._jb_up,
                                on_joy_axis=self._jaxis, on_joy_hat=self._jhat)
@@ -703,20 +730,44 @@ class KivyBridge(object):
     def _live(self):
         return bool(getattr(self.rt, "running", False))
 
-    def _key_down(self, _w, key, scancode=None, codepoint=None, modifier=None, *a):
-        if not self._live() or self.text_focused():
-            return False
-        name = self.rt.input.key_name(key)
-        if self.rt.input.key_down(name):
-            self.rt.dispatch_key(name, "down", codepoint or "")
+    def _fail(self, where, ex):
+        try:
+            self.rt.log("[input] erro em %s (%s): %s" % (where, type(ex).__name__, ex))
+        except Exception:
+            pass
+
+    def _keyboard(self, _w, key=None, *a):
+        # O Android converte B/Select do controle em Voltar (27); sem isso
+        # o jogo fechava ao apertar um botao.
+        try:
+            if key == 27 and self._live() and self.rt.input.pad_recent():
+                return True
+        except Exception as ex:
+            self._fail("on_keyboard", ex)
         return False
 
-    def _key_up(self, _w, key, *a):
-        if not self._live():
-            return False
-        name = self.rt.input.key_name(key)
-        if self.rt.input.key_up(name):
-            self.rt.dispatch_key(name, "up", "")
+    def _key_down(self, _w, key=None, scancode=None, codepoint=None, modifier=None, *a):
+        try:
+            if not self._live() or self.text_focused():
+                return False
+            name = self.rt.input.key_name(key)
+            if name in FALLBACK_KEYS and self.rt.input.pad_recent():
+                return False
+            if self.rt.input.key_down(name):
+                self.rt.dispatch_key(name, "down", codepoint or "")
+        except Exception as ex:
+            self._fail("teclado", ex)
+        return False
+
+    def _key_up(self, _w, key=None, *a):
+        try:
+            if not self._live():
+                return False
+            name = self.rt.input.key_name(key)
+            if self.rt.input.key_up(name):
+                self.rt.dispatch_key(name, "up", "")
+        except Exception as ex:
+            self._fail("teclado", ex)
         return False
 
     def _joy_buttons(self):
@@ -725,17 +776,23 @@ class KivyBridge(object):
         # listener does not guarantee that it receives controller events.
         return self._live()
 
-    def _jb_down(self, _w, stick, button, *a):
-        if self._joy_buttons():
-            self.rt.input.joy_button(stick, button, True)
+    def _jb_down(self, _w, stick=0, button=0, *a):
+        try:
+            if self._joy_buttons():
+                self.rt.input.joy_button(stick, button, True)
+        except Exception as ex:
+            self._fail("botao do controle", ex)
         return False
 
-    def _jb_up(self, _w, stick, button, *a):
-        if self._joy_buttons():
-            self.rt.input.joy_button(stick, button, False)
+    def _jb_up(self, _w, stick=0, button=0, *a):
+        try:
+            if self._joy_buttons():
+                self.rt.input.joy_button(stick, button, False)
+        except Exception as ex:
+            self._fail("botao do controle", ex)
         return False
 
-    def _jaxis(self, _w, stick, axis, value, *a):
+    def _jaxis(self, _w, stick=0, axis=0, value=0.0, *a):
         if not self._live():
             return False
         try:
@@ -748,7 +805,10 @@ class KivyBridge(object):
                 pass
         return False
 
-    def _jhat(self, _w, stick, hat, value, *a):
-        if self._joy_buttons():
-            self.rt.input.joy_hat(stick, hat, value)
+    def _jhat(self, _w, stick=0, hat=0, value=(0, 0), *a):
+        try:
+            if self._joy_buttons():
+                self.rt.input.joy_hat(stick, hat, value)
+        except Exception as ex:
+            self._fail("direcional do controle", ex)
         return False

@@ -2,30 +2,38 @@
 """Sistema de projetos do LuaStudio.
 
 Um projeto e uma pasta com o MESMO NOME do projeto, direto em
-`Documents/` (ex.: `Documents/my_game/`), contendo:
+`Documents/` (ex.: `Documents/my_game/`). Essa pasta e o **Source**:
 
-  - project.json   manifesto (nome, icone, script de entrada, scripts)
-  - scripts/*.lua  um ou mais arquivos de script/modulo do projeto
-  - assets/*       imagens, sons etc. usados pelo projeto
-  - icon.png       (opcional) imagem de icone escolhida na criacao
+  Documents/my_game/
+    manifest.json   manifesto (nome, icone, script de entrada, tela...)
+    Scripts/        os .lua do projeto
+    Assets/         imagens, fontes etc.
+    Sound/          audios
+    (qualquer outra pasta/arquivo que voce criar tambem fica aqui)
 
-Projetos criados por versoes antigas (em `LuaStudio/Projects/`) continuam
-aparecendo na lista e abrindo normalmente.
+Tudo que e criado/importado na Engine vai pra essa pasta, e um caminho
+como `Source = "Assets/hero.png"` e relativo a ela.
 
-Todos os scripts de um projeto rodam no MESMO runtime Lua (mesmas
-variaveis globais, mesma cena), entao podem se comunicar entre si e
-editar os mesmos objetos, por exemplo:
+Ao exportar um `.Lsp` (um .zip por baixo), a MESMA estrutura vai pra
+dentro do pacote - o Source passa a ser o conteudo do proprio .Lsp:
 
-  - um script cria `create.part.Player = {...}` e outro faz
-    `app.find("Player")` pra mexer nele;
-  - ou, no estilo Lua padrao, um script vira "modulo" e devolve uma
-    tabela com `return M`; qualquer outro script do projeto pode pegar
-    essa tabela com `local m = require("nome_do_arquivo")`.
+  jogo.Lsp/
+    manifest.json
+    Scripts/
+    Assets/
+    Sound/
+    ...
 
-Um projeto pode ser exportado como um pacote `.Lsp` (um .zip por baixo)
-com o manifesto + todos os scripts + assets, pra ser aberto tanto pelo
-proprio editor (LuaStudio) quanto pelo LuaStudio Player (o app separado
-que so executa jogos, em tela cheia).
+O Player abre o .Lsp e usa os arquivos de dentro dele como Source.
+
+Projetos antigos (project.json, scripts/, assets/, ou os da pasta
+`LuaStudio/Projects/`) continuam abrindo e sao migrados sozinhos pro
+formato novo.
+
+Todos os scripts de um projeto rodam no MESMO runtime Lua, entao podem
+se comunicar entre si e editar os mesmos objetos (`app.find("Player")`),
+ou virar "modulo" com `return M` e ser carregados com
+`local m = require("nome_do_arquivo")`.
 """
 
 import os
@@ -36,10 +44,18 @@ import zipfile
 
 from . import permissions as perms
 from . import screenfit
+from . import pathutil
 
-PROJECT_FILE = "project.json"
-SCRIPTS_DIR = "scripts"
-ASSETS_DIR = "assets"
+MANIFEST_FILE = "manifest.json"
+LEGACY_MANIFEST_FILE = "project.json"
+PROJECT_FILE = MANIFEST_FILE            # nome antigo, mantido por compatibilidade
+SCRIPTS_DIR = "Scripts"
+ASSETS_DIR = "Assets"
+SOUND_DIR = "Sound"
+STANDARD_DIRS = (SCRIPTS_DIR, ASSETS_DIR, SOUND_DIR)
+AUDIO_EXTS = (".ogg", ".wav", ".mp3", ".flac", ".m4a", ".opus")
+# o que NUNCA entra num .Lsp exportado (cache, lixo, pastas ocultas)
+_EXPORT_SKIP_DIRS = {"__pycache__", ".lsfontcache"}
 LSP_EXT = ".Lsp"
 ENGINE_VERSION = 1
 
@@ -192,6 +208,84 @@ def project_exists(name):
     return os.path.exists(project_folder_path(name))
 
 
+
+# ------------------------------------------------- layout / migracao
+def find_manifest(path):
+    """Caminho do manifesto da pasta (manifest.json; aceita o project.json
+    antigo) ou None."""
+    for fn in (MANIFEST_FILE, LEGACY_MANIFEST_FILE):
+        full = os.path.join(path, fn)
+        if os.path.isfile(full):
+            return full
+    return None
+
+
+def is_project_folder(path):
+    try:
+        return os.path.isdir(path) and find_manifest(path) is not None
+    except OSError:
+        return False
+
+
+def _rename_dir_to(path, old_lower, new_name):
+    """Renomeia `scripts` -> `Scripts` (etc.) se existir com outra caixa.
+    Passa por um nome temporario por causa de sistemas de arquivos que
+    ignoram caixa."""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return
+    exact = [n for n in names if n == new_name]
+    other = [n for n in names if n.lower() == old_lower and n != new_name]
+    if exact or not other:
+        return
+    src = os.path.join(path, other[0])
+    if not os.path.isdir(src):
+        return
+    tmp = os.path.join(path, ".__mig_" + new_name)
+    try:
+        os.rename(src, tmp)
+        os.rename(tmp, os.path.join(path, new_name))
+    except OSError:
+        pass
+
+
+def migrate_folder(path):
+    """Leva uma pasta de projeto do formato antigo (project.json, scripts/,
+    assets/) pro novo (manifest.json, Scripts/, Assets/, Sound/)."""
+    if not path or not os.path.isdir(path):
+        return
+    new_m = os.path.join(path, MANIFEST_FILE)
+    old_m = os.path.join(path, LEGACY_MANIFEST_FILE)
+    try:
+        if os.path.isfile(old_m) and not os.path.isfile(new_m):
+            os.rename(old_m, new_m)
+        elif os.path.isfile(old_m) and os.path.isfile(new_m):
+            os.remove(old_m)
+    except OSError:
+        pass
+    _rename_dir_to(path, "scripts", SCRIPTS_DIR)
+    _rename_dir_to(path, "assets", ASSETS_DIR)
+    _rename_dir_to(path, "sound", SOUND_DIR)
+
+
+def ensure_layout(path):
+    """Garante manifest-friendly: Scripts/, Assets/ e Sound/ existem."""
+    migrate_folder(path)
+    for d in STANDARD_DIRS:
+        full = os.path.join(path, d)
+        if not os.path.isdir(full):
+            os.makedirs(full)
+
+
+def _skip_export(rel_parts):
+    for part in rel_parts[:-1]:
+        if part in _EXPORT_SKIP_DIRS or part.startswith("."):
+            return True
+    last = rel_parts[-1]
+    return last.startswith(".") or last in _EXPORT_SKIP_DIRS
+
+
 # ------------------------------------------------------------------ Project
 class Project(object):
     """Projeto em memoria: nome, scripts {arquivo.lua: codigo}, entrada."""
@@ -270,12 +364,8 @@ def _scan_root(root, legacy):
         return out
     for entry in names:
         path = os.path.join(root, entry)
-        manifest_path = os.path.join(path, PROJECT_FILE)
-        try:
-            ok = os.path.isdir(path) and os.path.isfile(manifest_path)
-        except OSError:
-            ok = False
-        if not ok:
+        manifest_path = find_manifest(path) if os.path.isdir(path) else None
+        if not manifest_path:
             continue
         data = {}
         try:
@@ -319,7 +409,7 @@ def list_projects():
 # ------------------------------------------------------------------- criar
 def create_project(name, icon=None, image_src=None, save=True, unique=False):
     """Cria um projeto NOVO. Por padrao ja cria a pasta de verdade em
-    `Documents/<nome>/` (com project.json, scripts/ e assets/).
+    `Documents/<nome>/` (com manifest.json, Scripts/, Assets/ e Sound/).
 
     - icon: dict de icone (ver `normalize_icon`); `image_src` = caminho de
       uma imagem qualquer do dispositivo, copiada como `icon.<ext>`.
@@ -369,15 +459,13 @@ def set_icon_image(proj, src_path):
 # ------------------------------------------------------------------- salvar
 def save_project(proj):
     """Grava o projeto (manifesto + scripts) na pasta em disco. Devolve o
-    caminho da pasta."""
+    caminho da pasta. Assets, sons e pastas novas ja vivem direto nela."""
     if not proj.path:
         proj.path = os.path.join(projects_root(), _safe_name(proj.name))
+    if not os.path.isdir(proj.path):
+        os.makedirs(proj.path)
+    ensure_layout(proj.path)
     scripts_dir = os.path.join(proj.path, SCRIPTS_DIR)
-    if not os.path.isdir(scripts_dir):
-        os.makedirs(scripts_dir)
-    assets_path = os.path.join(proj.path, ASSETS_DIR)
-    if not os.path.isdir(assets_path):
-        os.makedirs(assets_path)
     # remove do disco scripts que nao existem mais no projeto em memoria
     for fn in os.listdir(scripts_dir):
         if fn.lower().endswith(".lua") and fn not in proj.scripts:
@@ -388,14 +476,17 @@ def save_project(proj):
     for name, code in proj.scripts.items():
         with open(os.path.join(scripts_dir, name), "w", encoding="utf-8") as fh:
             fh.write(code)
-    with open(os.path.join(proj.path, PROJECT_FILE), "w", encoding="utf-8") as fh:
+    with open(os.path.join(proj.path, MANIFEST_FILE), "w", encoding="utf-8") as fh:
         json.dump(proj.manifest(), fh, ensure_ascii=False, indent=2)
     return proj.path
 
 
 # -------------------------------------------------------------------- abrir
 def load_project(path):
-    manifest_path = os.path.join(path, PROJECT_FILE)
+    migrate_folder(path)
+    manifest_path = find_manifest(path)
+    if not manifest_path:
+        raise FileNotFoundError(os.path.join(path, MANIFEST_FILE))
     with open(manifest_path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
     proj = Project(name=data.get("name") or os.path.basename(path), path=path)
@@ -407,7 +498,8 @@ def load_project(path):
     proj.icon = normalize_icon(data.get("icon"))
     apk_cfg = data.get("apk")
     proj.apk = dict(apk_cfg) if isinstance(apk_cfg, dict) else {}
-    scripts_dir = os.path.join(path, SCRIPTS_DIR)
+    scripts_dir = (pathutil.find_child_dir(path, SCRIPTS_DIR)
+                   or os.path.join(path, SCRIPTS_DIR))
     names = list(data.get("scripts") or [])
     if os.path.isdir(scripts_dir):
         for fn in sorted(os.listdir(scripts_dir)):
@@ -427,9 +519,9 @@ def load_project(path):
 
 def delete_project(path):
     """Apaga a pasta inteira do projeto. Por seguranca, so apaga se a
-    pasta tiver um project.json (nunca `Documents/` ou outra pasta
+    pasta tiver um manifest.json (nunca `Documents/` ou outra pasta
     qualquer). Devolve True se apagou."""
-    if not path or not os.path.isfile(os.path.join(path, PROJECT_FILE)):
+    if not path or not find_manifest(path):
         return False
     shutil.rmtree(path, ignore_errors=True)
     return not os.path.exists(path)
@@ -439,7 +531,7 @@ def delete_project(path):
 def _safe_extract_path(dest_dir, member_name):
     """Resolve o caminho de uma entrada de dentro do .Lsp (zip) pra um
     destino seguro DENTRO de dest_dir - protege contra Zip Slip (entradas
-    tipo 'assets/../../../etc/algo' ou caminho absoluto tentando escapar
+    tipo 'Assets/../../../etc/algo' ou caminho absoluto tentando escapar
     da pasta de destino). Devolve None se a entrada for suspeita."""
     dest_dir = os.path.abspath(dest_dir)
     name = (member_name or "").replace("\\", "/")
@@ -453,33 +545,56 @@ def _safe_extract_path(dest_dir, member_name):
 
 
 def export_lsp(proj, dest_path=None):
-    """Empacota o projeto inteiro (manifesto + scripts + assets) num
-    arquivo `.Lsp` (um zip). Devolve o caminho final do arquivo."""
+    """Empacota o projeto num `.Lsp` (um zip) com a MESMA estrutura da
+    pasta do projeto: manifest.json, Scripts/, Assets/, Sound/ e qualquer
+    outra pasta/arquivo que exista nela. Dentro do .Lsp esse conteudo e o
+    Source do jogo. Devolve o caminho final do arquivo."""
     if dest_path is None:
         dest_path = os.path.join(perms.storage_dir(), _safe_name(proj.name) + LSP_EXT)
     if not dest_path.lower().endswith(LSP_EXT.lower()):
         dest_path += LSP_EXT
     manifest_json = json.dumps(proj.manifest(), ensure_ascii=False, indent=2)
+    root = proj.path if (proj.path and os.path.isdir(proj.path)) else None
+    reserved = {MANIFEST_FILE.lower(), LEGACY_MANIFEST_FILE.lower()}
+    scripts_prefix = SCRIPTS_DIR.lower()
     with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(PROJECT_FILE, manifest_json)
+        zf.writestr(MANIFEST_FILE, manifest_json)
+        # scripts vem da memoria (podem ter edicoes ainda nao salvas)
+        zf.writestr(SCRIPTS_DIR + "/", "")
         for name, code in proj.scripts.items():
             zf.writestr(SCRIPTS_DIR + "/" + name, code)
-        icon_file = normalize_icon(proj.icon).get("image")
-        if icon_file and proj.path:
-            icon_full = os.path.join(proj.path, icon_file)
-            if os.path.isfile(icon_full):
-                zf.write(icon_full, icon_file)
-        assets_dir = os.path.join(proj.path, ASSETS_DIR) if proj.path else None
-        if assets_dir and os.path.isdir(assets_dir):
-            for root, _dirs, files in os.walk(assets_dir):
-                for fn in files:
-                    full = os.path.join(root, fn)
-                    rel = os.path.relpath(full, proj.path)
-                    zf.write(full, rel.replace(os.sep, "/"))
+        for d in (ASSETS_DIR, SOUND_DIR):
+            zf.writestr(d + "/", "")
+        if root:
+            for cur, dirs, files in os.walk(root):
+                rel_dir = os.path.relpath(cur, root)
+                parts_dir = [] if rel_dir == "." else rel_dir.split(os.sep)
+                dirs[:] = sorted(d for d in dirs
+                                 if d not in _EXPORT_SKIP_DIRS and not d.startswith("."))
+                if parts_dir and parts_dir[0].lower() != scripts_prefix:
+                    arc_dir = "/".join(parts_dir) + "/"
+                    if not files and not dirs:
+                        zf.writestr(arc_dir, "")      # pasta vazia tambem vai
+                for fn in sorted(files):
+                    parts = parts_dir + [fn]
+                    if _skip_export(parts):
+                        continue
+                    if not parts_dir and fn.lower() in reserved:
+                        continue
+                    if parts_dir and parts_dir[0].lower() == scripts_prefix:
+                        continue                       # ja gravado da memoria
+                    zf.write(os.path.join(cur, fn), "/".join(parts))
     return dest_path
 
 
 # ------------------------------------------------------------- ler .Lsp
+def _lsp_manifest_name(names):
+    for cand in (MANIFEST_FILE, LEGACY_MANIFEST_FILE):
+        if cand in names:
+            return cand
+    return None
+
+
 def read_lsp(lsp_path):
     """Le um `.Lsp` e devolve `(manifest, scripts)` sem gravar nada em
     disco -- e o que o LuaStudio Player usa pra rodar direto do pacote."""
@@ -487,14 +602,15 @@ def read_lsp(lsp_path):
     manifest = {}
     with zipfile.ZipFile(lsp_path, "r") as zf:
         names = zf.namelist()
-        if PROJECT_FILE in names:
+        mname = _lsp_manifest_name(names)
+        if mname:
             try:
-                manifest = json.loads(zf.read(PROJECT_FILE).decode("utf-8"))
+                manifest = json.loads(zf.read(mname).decode("utf-8"))
             except Exception:
                 manifest = {}
-        prefix = SCRIPTS_DIR + "/"
+        prefix = SCRIPTS_DIR.lower() + "/"
         for n in names:
-            if n.startswith(prefix) and n.lower().endswith(".lua"):
+            if n.lower().startswith(prefix) and n.lower().endswith(".lua"):
                 short = n[len(prefix):]
                 if "/" not in short:
                     scripts[short] = zf.read(n).decode("utf-8")
@@ -508,32 +624,47 @@ def read_lsp(lsp_path):
     return manifest, scripts
 
 
-def extract_lsp_assets(lsp_path, dest_dir):
-    """Extrai so a pasta assets/ do `.Lsp` pra dest_dir (usado pra achar
-    imagens/sons que os scripts do jogo referenciam)."""
-    out_dir = os.path.join(dest_dir, ASSETS_DIR)
+def extract_lsp(lsp_path, dest_dir, skip_scripts=False):
+    """Extrai TODO o conteudo do `.Lsp` pra `dest_dir`, que passa a ser o
+    Source do jogo (Assets/, Sound/, Scripts/, pastas extras...). Devolve
+    dest_dir."""
+    if not os.path.isdir(dest_dir):
+        os.makedirs(dest_dir)
+    skip_prefix = SCRIPTS_DIR.lower() + "/"
     with zipfile.ZipFile(lsp_path, "r") as zf:
-        prefix = ASSETS_DIR + "/"
-        for n in zf.namelist():
-            if n.startswith(prefix) and not n.endswith("/"):
-                target = _safe_extract_path(dest_dir, n)
-                if target is None:
-                    continue  # entrada suspeita (zip slip) - ignora
-                target_folder = os.path.dirname(target)
-                if not os.path.isdir(target_folder):
-                    os.makedirs(target_folder)
-                with open(target, "wb") as fh:
-                    fh.write(zf.read(n))
-    return out_dir
+        for info in zf.infolist():
+            n = info.filename
+            if skip_scripts and n.lower().startswith(skip_prefix):
+                continue
+            target = _safe_extract_path(dest_dir, n)
+            if target is None:
+                continue  # entrada suspeita (zip slip) - ignora
+            if n.endswith("/"):
+                if not os.path.isdir(target):
+                    os.makedirs(target)
+                continue
+            target_folder = os.path.dirname(target)
+            if not os.path.isdir(target_folder):
+                os.makedirs(target_folder)
+            with open(target, "wb") as fh:
+                fh.write(zf.read(info))
+    return dest_dir
+
+
+def extract_lsp_assets(lsp_path, dest_dir):
+    """Nome antigo: agora extrai o pacote inteiro (ver `extract_lsp`)."""
+    return extract_lsp(lsp_path, dest_dir)
 
 
 def import_lsp_as_project(lsp_path):
-    """Importa um `.Lsp` pra dentro de Projects/, pra dar pra editar de
+    """Importa um `.Lsp` pra `Documents/<nome>/`, pra dar pra editar de
     volta no LuaStudio (IDE). Devolve o Project ja salvo em disco."""
     manifest, scripts = read_lsp(lsp_path)
     proj = create_project(manifest.get("name") or "Projeto importado",
                           save=False, unique=True)
     proj.icon = normalize_icon(manifest.get("icon"))
+    if isinstance(manifest.get("screen"), dict):
+        proj.screen.update(manifest["screen"])
     # renomeia cada script pelo mesmo sanitizador de add_script() - nomes
     # de dentro de um .Lsp nao sao confiaveis (podem ter vindo de um zip
     # editado a mao), entao nunca viram nome de arquivo direto no disco.
@@ -548,56 +679,71 @@ def import_lsp_as_project(lsp_path):
         proj.entry = sorted(proj.scripts.keys())[0]
     save_project(proj)
     try:
-        extract_lsp_assets(lsp_path, proj.path)
+        # Assets/, Sound/, icone e pastas extras - tudo menos Scripts/ e
+        # o manifesto (esses o save_project acabou de gravar)
+        extract_lsp(lsp_path, proj.path, skip_scripts=True)
+        migrate_folder(proj.path)
+        save_project(proj)
     except Exception:
         pass
-    icon_file = proj.icon.get("image")
-    if icon_file:
-        try:
-            with zipfile.ZipFile(lsp_path, "r") as zf:
-                if icon_file in zf.namelist():
-                    with open(os.path.join(proj.path, icon_file), "wb") as fh:
-                        fh.write(zf.read(icon_file))
-        except Exception:
-            pass
     return proj
 
 
-def find_lsp_files():
-    """Procura arquivos `.Lsp` nos lugares mais comuns (pasta do
-    LuaStudio, raiz do armazenamento, Download) pra listar num popup de
-    'Importar .Lsp'."""
-    seen, out = set(), []
+def find_lsp_files(max_depth=3):
+    """Procura arquivos `.Lsp` na pasta do LuaStudio (incluindo subpastas),
+    na raiz do armazenamento, em Download e em Documents. Os mais novos
+    vem primeiro, entao um jogo recem exportado aparece no topo."""
     storage = perms.storage_dir()
     bases = [storage]
     parent = os.path.dirname(storage.rstrip(os.sep))
     if parent:
         bases.append(parent)
         bases.append(os.path.join(parent, "Download"))
+        bases.append(os.path.join(parent, "Documents"))
+    try:
+        bases.append(projects_root())
+    except Exception:
+        pass
+    ext = LSP_EXT.lower()
+    seen, found = set(), []
     for b in bases:
         if not b or not os.path.isdir(b):
             continue
+        base_depth = b.rstrip(os.sep).count(os.sep)
+        recurse = os.path.abspath(b) != os.path.abspath(parent or "")
         try:
-            for fn in sorted(os.listdir(b)):
-                if fn.lower().endswith(LSP_EXT.lower()):
-                    full = os.path.join(b, fn)
-                    if full not in seen:
-                        seen.add(full)
-                        out.append(full)
+            for root, dirs, files in os.walk(b):
+                depth = root.rstrip(os.sep).count(os.sep) - base_depth
+                dirs[:] = [d for d in dirs if not d.startswith(".")] if (recurse and depth < max_depth) else []
+                for fn in files:
+                    if not fn.lower().endswith(ext):
+                        continue
+                    full = os.path.join(root, fn)
+                    key = os.path.abspath(full)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        mt = os.path.getmtime(full)
+                    except Exception:
+                        mt = 0.0
+                    found.append((mt, full))
         except Exception:
             pass
-    return out
+    found.sort(key=lambda t: t[0], reverse=True)
+    return [f for _m, f in found]
 
 
 # --------------------------------------------------- assets (importar)
 def assets_dir(proj, create=False):
-    """Caminho da pasta `assets/` do projeto (a pasta 'Source/Assets'
-    que o navegador de arquivos usa como atalho). Se `create=True` e o
+    """Caminho da pasta `assets/` do projeto (Source/Assets, atalho
+    do navegador de arquivos). Se `create=True` e o
     projeto ja tem uma pasta no disco (`proj.path`), cria a pasta se
     ainda nao existir."""
     if not proj.path:
         return None
-    path = os.path.join(proj.path, ASSETS_DIR)
+    path = (pathutil.find_child_dir(proj.path, ASSETS_DIR)
+            or os.path.join(proj.path, ASSETS_DIR))
     if create:
         try:
             if not os.path.isdir(path):
@@ -620,10 +766,10 @@ def _unique_name(dest_dir, name):
 
 def import_asset_file(proj, src_path):
     """Copia um arquivo de QUALQUER pasta do dispositivo (escolhido no
-    navegador de arquivos livre) pra dentro de `assets/` do projeto
-    atual. Devolve o caminho relativo (ex: 'assets/personagem.png') pra
-    usar em `SpriteSource` etc, ou None se falhar. Precisa que o
-    projeto ja tenha sido salvo pelo menos uma vez (tem `proj.path`)."""
+    navegador de arquivos livre) pra dentro do projeto: audios vao pra
+    `Sound/`, o resto pra `Assets/`. Devolve o caminho relativo ao Source
+    (ex: 'Assets/personagem.png', 'Sound/tiro.ogg') pra usar em `Source`
+    etc, ou None se falhar."""
     if not proj.path or not src_path or not os.path.isfile(src_path):
         return None
     if not os.path.isdir(proj.path):
@@ -631,13 +777,14 @@ def import_asset_file(proj, src_path):
             os.makedirs(proj.path)
         except Exception:
             return None
-    dest_dir = assets_dir(proj, create=True)
-    if not dest_dir:
-        return None
+    ensure_layout(proj.path)
+    is_audio = os.path.splitext(src_path)[1].lower() in AUDIO_EXTS
+    folder = SOUND_DIR if is_audio else ASSETS_DIR
+    dest_dir = os.path.join(proj.path, folder)
     name = _unique_name(dest_dir, os.path.basename(src_path))
     dest = os.path.join(dest_dir, name)
     try:
         shutil.copyfile(src_path, dest)
     except Exception:
         return None
-    return "/".join([ASSETS_DIR, name])
+    return "/".join([folder, name])

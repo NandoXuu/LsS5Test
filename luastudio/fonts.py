@@ -98,8 +98,9 @@ class FontManager(object):
             candidates.append(direct)
         for sub in _FONT_SUBDIRS:
             candidates.append(os.path.join(proj, sub.replace("/", os.sep), base))
-        assets_root = os.path.join(proj, "assets")
-        if os.path.isdir(assets_root):
+        from . import pathutil
+        assets_root = pathutil.find_child_dir(proj, "Assets")
+        if assets_root:
             for root, _dirs, files in os.walk(assets_root):
                 if base in files:
                     candidates.append(os.path.join(root, base))

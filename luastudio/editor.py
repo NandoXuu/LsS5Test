@@ -11,6 +11,7 @@ from kivy.graphics import (Color, Rectangle, RoundedRectangle, Line,
 
 from . import theme
 from . import prefs
+from . import softkeyboard
 
 try:
     from kivy.uix.codeinput import CodeInput
@@ -83,6 +84,7 @@ class LuaEditor(CodeInput):
             kw.setdefault("style_name", "monokai")
             kw.pop("foreground_color", None)
         CodeInput.__init__(self, **kw)
+        softkeyboard.bind_textinput(self)
         self.background_color = theme.MONO_BG
         Clock.schedule_once(
             lambda *_a: setattr(self, "background_color", theme.MONO_BG), 0)

@@ -7,6 +7,7 @@ import re
 import time
 
 from kivy.uix.widget import Widget
+from kivy.uix.stencilview import StencilView
 from kivy.uix.textinput import TextInput
 from kivy.graphics import (Color, Rectangle, Line, PushMatrix, PopMatrix,
                            Rotate, Translate, Scale, Mesh, RoundedRectangle,
@@ -38,20 +39,29 @@ from . import tilemap as tilemap_mod
 from . import glsl as glsl_mod
 from . import richtext as richtext_mod
 from . import inputs as inputs_mod
+from . import softkeyboard
 from .api import to_color, to_vec, vec_table, safe_float
 from .lua import tostring, truthy, LuaTable
 
 
-class Stage(Widget):
+class Stage(StencilView):
+    # CLIP DE BORDA: o Kivy NAO recorta o desenho dos widgets sozinho, entao
+    # sprite/projetil/tilemap/camera 2D que passava da borda do 16:9 (ou de
+    # qualquer aspect) vazava por cima da UI do editor e das barras do
+    # letterbox. StencilView recorta TUDO que o Stage e seus filhos desenham
+    # (cena 2D/3D, postfx, TextInputs) ao retangulo dele; o stencil fica em
+    # canvas.before/after, que o canvas.clear() do redraw() nao apaga. Usa
+    # stencil (e nao Scissor) de proposito: o Scissor do GL tambem cortaria
+    # os Fbos internos (camadas, mascaras, postfx), que desenham em (0,0).
     def __init__(self, runtime, **kw):
         Widget.__init__(self, **kw)
         self.runtime = runtime
         self._textures = {}
         self._gradients = {}
-        self._tex_manager = texture_mod.TextureManager(runtime.resolve, runtime.log)
+        self._tex_manager = texture_mod.TextureManager(runtime.resolve_asset, runtime.log)
         self._render_pipeline = pipeline_mod.RenderPipeline()
         # ---- materiais GLSL (shaders reais, via kivy.graphics.RenderContext) ----
-        glsl_mod.SHADERS.resolver.set_path_resolver(runtime.resolve)
+        glsl_mod.SHADERS.resolver.set_path_resolver(runtime.resolve_asset)
         self._glsl_ctx = {}       # nome do material -> RenderContext ja compilado
         self._glsl_broken = set()  # materiais que falharam ao compilar (nao tenta de novo)
         self._normalmap_ctx = {}
@@ -77,11 +87,15 @@ class Stage(Widget):
             except Exception:
                 pass
         # teclado + gamepad (on_key_*/on_joy_*) -> runtime.input
+        self._ui_touches = set()
         self._input_bridge = inputs_mod.KivyBridge(Window, runtime, self._text_focused)
         self._input_bridge.attach()
+        runtime.typing_probe = self._text_focused
 
     def _text_focused(self):
-        return any(getattr(ti, "focus", False) for ti in self._text_inputs.values())
+        if any(getattr(ti, "focus", False) for ti in self._text_inputs.values()):
+            return True
+        return softkeyboard.any_text_focused()
 
     def release_input(self):
         """Desliga o teclado/gamepad deste Stage (usado quando o Stage morre
@@ -331,6 +345,7 @@ class Stage(Widget):
                     except Exception:
                         pass
                 ti._luastudio_obj = obj
+                softkeyboard.bind_textinput(ti)
                 ti.bind(text=lambda w, value, o=obj: self._text_changed(o, value))
                 ti.bind(focus=lambda w, focused, o=obj: self._text_focus(o, focused))
                 ti.bind(on_text_validate=lambda w, o=obj: self._text_submitted(o))
@@ -998,7 +1013,7 @@ class Stage(Widget):
     def _draw_mesh2d(self, obj):
         if obj.cls == "destructmesh" and not getattr(obj, "_mesh_tris", None):
             from . import destruction as destruction_mod
-            destruction_mod.build_instance_mesh(obj, self.runtime.resolve)
+            destruction_mod.build_instance_mesh(obj, self.runtime.resolve_asset)
         render_tris = getattr(obj, "_render_tris", None)
         if not render_tris:
             return
@@ -1058,7 +1073,7 @@ class Stage(Widget):
         return col_min, col_max, row_min, row_max, tw, th
 
     def _draw_tilemap(self, obj):
-        path = self.runtime.resolve(str(obj.props.get("File") or ""))
+        path = self.runtime.resolve_asset(str(obj.props.get("File") or ""))
         map_data = self.runtime.get_tilemap_data(path)
         if map_data is None:
             return
@@ -1701,7 +1716,7 @@ class Stage(Widget):
             return self._tex_manager.get(source, filter_mode=filter_mode)
         if source in self._textures:
             return self._textures[source]
-        path = self.runtime.resolve(source)
+        path = self.runtime.resolve_asset(source)
         tex = None
         try:
             tex = CoreImage(path).texture
@@ -1759,6 +1774,7 @@ class Stage(Widget):
         # O Stage antigo interceptava o toque e nunca chamava Widget.on_touch_down,
         # entao os TextInput ficavam visiveis mas completamente sem input.
         if super().on_touch_down(touch):
+            self._ui_touches.add(touch.uid)
             return True
         btn = getattr(touch, "button", None) or "left"
         self.runtime.mouse_buttons.add(btn)
@@ -1809,6 +1825,8 @@ class Stage(Widget):
         # TextInput enquanto o dedo/mouse estiver sobre ele.
         if super().on_touch_move(touch):
             return True
+        if touch.uid in self._ui_touches:
+            return True
         self.runtime.dispatch_touch(touch.x - self.x,
                                     self.y + self.height - touch.y, "move", touch.uid)
         return True
@@ -1817,6 +1835,9 @@ class Stage(Widget):
         # O TextInput precisa receber o touch_up para finalizar selecao e
         # manter o estado de foco corretamente.
         child_handled = super().on_touch_up(touch)
+        if touch.uid in self._ui_touches:
+            self._ui_touches.discard(touch.uid)
+            return True
         btn = getattr(touch, "button", None) or "left"
         self.runtime.mouse_buttons.discard(btn)
         self.runtime.input.mouse_release(btn)

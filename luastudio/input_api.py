@@ -8,6 +8,7 @@ input.keyboard.*   input.mouse.*   input.gamepad.* (alias input.controller)
 
 from .lua import LuaTable, tostring, to_py
 from . import inputs as inp
+from . import softkeyboard as softkb
 
 
 def _pid(a):
@@ -92,6 +93,17 @@ def install(rt, input_t):
         if fn is not None:
             rt.key_handlers.append(fn)
     kb.set("onKey", _on_key)
+    kb.set("isTyping", lambda *a: bool(rt.typing_probe()))
+    kb.set("hasHardware", lambda *a: bool(softkb.has_hardware_keyboard(True)))
+    kb.set("hideVirtual", lambda *a: softkb.hide_virtual())
+
+    def _set_virtual(m=None):
+        if not softkb.set_mode(m):
+            rt.log("[input] modo de teclado virtual invalido: use auto, always ou never")
+            return False
+        return True
+    kb.set("setVirtual", _set_virtual)
+    kb.set("getVirtual", lambda *a: softkb.mode())
     input_t.set("keyboard", kb)
 
     # --------------------------------------------------------- mouse

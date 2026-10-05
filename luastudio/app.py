@@ -23,13 +23,15 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
+from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.metrics import dp
 
 from .editor import EditorPane
 from .stage import Stage
+from . import uiguard
+from . import playlaunch
 from .runtime import Runtime
 from . import permissions as perms
 from . import project as luaproject
@@ -309,13 +311,19 @@ class LuaStudioApp(App):
         editor_root.add_widget(self._status_bar())
 
         # ---- telas: inicial (projetos) e editor, com transicao suave ----
-        self.sm = ScreenManager(transition=SlideTransition(duration=0.22))
+        # sem animacao de deslizar: trocar de tela e instantaneo (o slide deixava
+        # widgets/UI fora da tela quando a transicao travava ou era interrompida)
+        self.sm = ScreenManager(transition=NoTransition())
         self.home = HomeScreen(self)
         editor_screen = Screen(name="editor")
         editor_screen.add_widget(editor_root)
         self.sm.add_widget(self.home)
         self.sm.add_widget(editor_screen)
         self.sm.add_widget(self._build_play_screen())
+
+        self._ui_guard = uiguard.UIGuard(self, self.sm).install()
+        self._autosave_sig = None
+        Clock.schedule_interval(self._autosave, 15.0)
 
         Clock.schedule_interval(self._tick, 1.0 / 45.0)
         self._set_status("pronto", theme.TEXT_DIM)
@@ -560,9 +568,13 @@ class LuaStudioApp(App):
         self._refresh_project_bar()
 
     def run_code(self):
+        self.start_play()
+
+    def run_in_stage(self):
         if not self.project:
             return
         self._sync_editor_to_script()
+        self._release_text_focus()
         self.console.clear()
         # limpa o outline do erro anterior - se der erro de novo (mesma
         # linha ou outra), ele volta a aparecer logo abaixo.
@@ -620,6 +632,7 @@ class LuaStudioApp(App):
 
     def show_stage(self):
         if self.view != "stage":
+            self._release_text_focus()
             self.body.clear_widgets()
             self.stage_fit.set_from_config(self.project.screen)
             self.body.add_widget(self.stage_fit)
@@ -907,6 +920,9 @@ class LuaStudioApp(App):
     def _load_project(self, proj):
         self._sync_editor_to_script()
         self.project = proj
+        # Source = pasta do projeto (Documents/<nome>/): e dali que saem os
+        # assets (Source = "Assets/hero.png"), sons, fontes etc.
+        self.runtime.set_base_dir(proj.path or BASE)
         self.current_script = proj.entry
         self.editor.text = proj.scripts.get(proj.entry, "")
         self.editor.clear_error_line()
@@ -924,10 +940,41 @@ class LuaStudioApp(App):
 
     # ------------------------------------------------------- navegacao
     def _goto(self, name, direction="left"):
-        if self.sm.current == name:
+        uiguard.goto(self.sm, name, direction)
+        Clock.schedule_once(self._ui_guard.snap, 0)
+        Clock.schedule_once(self._ui_guard.snap, 0.15)
+
+    def _release_text_focus(self):
+        try:
+            self.editor.focus = False
+        except Exception:
+            pass
+        try:
+            from . import softkeyboard
+            softkeyboard.hide_virtual()
+            uiguard.lock_android_pan()
+        except Exception:
+            pass
+
+    def _autosave(self, _dt=None):
+        proj = self.project
+        if not proj or not getattr(proj, "path", None):
             return
-        self.sm.transition.direction = direction
-        self.sm.current = name
+        if self.sm.current != "editor":
+            return
+        try:
+            self._sync_editor_to_script()
+            sig = hash(tuple(sorted(proj.scripts.items())))
+            if sig == self._autosave_sig:
+                return
+            luaproject.save_project(proj)
+            self._autosave_sig = sig
+        except Exception as ex:
+            self.log("[autosave] falhou: %s" % ex)
+
+    def on_pause(self):
+        self._autosave()
+        return True
 
     def open_project(self, proj, play=False):
         """Abre `proj` (com transicao).
@@ -972,62 +1019,102 @@ class LuaStudioApp(App):
         return screen
 
     def start_play(self):
-        """Roda o jogo do projeto aberto na tela de jogo (tela cheia)."""
+        """Play: empacota o projeto (codigo + assets + tela) num .Lsp temporario
+        e abre no Player. No desktop e outro processo (player_main.py); no
+        Android/Pydroid so cabe um app Kivy por vez, entao o Player ocupa a
+        janela no lugar da interface do editor e devolve ela ao sair."""
         if not self.project or self.playing:
             return
+        proc = getattr(self, "_play_proc", None)
+        if proc is not None and proc.poll() is None:
+            self.log("[aviso] o Player ja esta aberto")
+            return
         self._sync_editor_to_script()
+        self._release_text_focus()
         self.console.clear()
         self.editor.clear_error_line()
+        self.editor.clear_warning_lines()
+        err = playlaunch.precheck(self.project)
+        if err:
+            self._set_status("erro - veja a linha marcada", theme.STOP)
+            self.log("[erro de sintaxe] %s: %s" % (err["chunk"], err["message"]))
+            if err.get("line") and err["chunk"] == self.current_script:
+                self.editor.mark_error_line(err["line"])
+            self.show_editor()
+            self._goto("editor", "left")
+            return
+        try:
+            luaproject.save_project(self.project)
+        except Exception as ex:
+            self.log("[aviso] nao consegui salvar antes do Play: %s" % ex)
         self.runtime.stop()
-        # o Stage e um widget so: tira do painel do editor (se estiver la)
-        self.show_editor()
-        if self.stage_fit.parent is not None:
-            self.stage_fit.parent.remove_widget(self.stage_fit)
-        self.stage_fit.set_from_config(self.project.screen)
-        self.play_holder.clear_widgets()
-        self.play_holder.add_widget(self.stage_fit)
-        self.playing = True
-        # fullscreen de verdade + orientacao do projeto (config "Tela")
-        screenfit.apply_screen_mode(self.project.screen)
-        self._goto("play", "left")
-        self._set_status("executando...", theme.WARN)
-        # espera o layout da tela nova pra o script ja comecar vendo o
-        # tamanho certo do Stage
-        self._play_ev = Clock.schedule_once(
-            lambda *_a: self._safe(self._play_run), 0.4)
-
-    def _play_run(self):
-        self._play_ev = None
-        if not self.playing or not self.project:
+        try:
+            tmpdir, lsp = playlaunch.export_for_play(self.project)
+        except Exception as ex:
+            self.log("[erro ao empacotar o projeto] %s" % ex)
+            self._set_status("erro ao empacotar", theme.STOP)
             return
         if self.plugin_manager:
             self.plugin_manager.events.emit("before_run", project=self.project)
-        ok = self.runtime.run_project(self.project.scripts, self.project.entry)
-        self.editor.clear_warning_lines()
-        self._mark_run_warnings()
-        if self.plugin_manager:
-            self.plugin_manager.events.emit("after_run", project=self.project, ok=ok)
-        if ok:
-            self.stage.redraw()
-            self._set_status("rodando", theme.PLAY)
-            n = len(self.project.scripts)
-            self.log("[ok] projeto executado (%d script%s)" % (n, "s" if n != 1 else ""))
+        proc = playlaunch.spawn_player(lsp)
+        if proc is not None:
+            self._play_proc = proc
+            self._play_tmp = tmpdir
+            self._set_status("rodando no Player", theme.PLAY)
+            self.log("[ok] Player aberto (%s)" % os.path.basename(lsp))
+            Clock.schedule_interval(self._poll_player, 0.5)
             return
-        # o jogo nao iniciou: em vez de deixar uma tela preta, abre o
-        # editor com a linha do erro marcada
-        self.exit_play("editor")
-        self._report_run_error()
+        self._play_tmp = tmpdir
+        self._enter_player_takeover(lsp)
+
+    def _poll_player(self, _dt):
+        proc = getattr(self, "_play_proc", None)
+        if proc is not None and proc.poll() is None:
+            return True
+        self._play_proc = None
+        playlaunch.cleanup(getattr(self, "_play_tmp", None))
+        self._play_tmp = None
+        self._set_status("parado", theme.TEXT_DIM)
+        return False
+
+    def _enter_player_takeover(self, lsp):
+        from .player_app import PlayerSession
+        self.playing = True
+        self._play_session = PlayerSession(
+            autoload=lsp, on_exit=lambda: self._safe(self.exit_play, "editor"))
+        if self.sm.parent is not None:
+            Window.remove_widget(self.sm)
+        Window.add_widget(self._play_session)
+        self._play_session.attach()
+        self._set_status("rodando no Player", theme.PLAY)
+        self.log("[ok] jogo aberto no Player (%s)" % os.path.basename(lsp))
 
     def _leave_play_mode(self):
-        """Para o jogo, devolve o Stage pra ninguem e restaura a janela."""
-        if self._play_ev is not None:
-            self._play_ev.cancel()
-            self._play_ev = None
+        """Fecha o Player (se estiver ocupando a janela) e devolve o editor."""
+        sess = getattr(self, "_play_session", None)
         self.playing = False
-        self.runtime.stop()
-        if self.stage_fit.parent is not None:
-            self.stage_fit.parent.remove_widget(self.stage_fit)
+        if sess is not None:
+            self._play_session = None
+            try:
+                sess.detach()
+            except Exception:
+                pass
+            if sess.parent is not None:
+                Window.remove_widget(sess)
+        if self.sm.parent is None:
+            Window.add_widget(self.sm)
+        try:
+            self.runtime.stop()
+        except Exception:
+            pass
         screenfit.restore_screen_mode()
+        playlaunch.cleanup(getattr(self, "_play_tmp", None))
+        self._play_tmp = None
+        try:
+            self._release_text_focus()
+            self._ui_guard.snap()
+        except Exception:
+            pass
 
     def exit_play(self, to="home"):
         """Sai do Play. `to="home"` volta pra tela inicial; `to="editor"`
@@ -1073,6 +1160,13 @@ class LuaStudioApp(App):
         projetos; na tela inicial fecha o app."""
         if key != 27:
             return False
+        if self.playing:
+            return True
+        try:
+            if self.runtime.input.pad_recent():
+                return True
+        except Exception:
+            pass
         if self.sm.current == "play":
             self._safe(self.exit_play)
             return True
@@ -1155,7 +1249,7 @@ class LuaStudioApp(App):
                 self.log("[erro] não foi possível importar \"%s\"" % src)
 
         filebrowser.open_picker(
-            title="Importar arquivo pra Assets", mode="file",
+            title="Importar arquivo (Assets/Sound)", mode="file",
             start=perms.storage_dir(),
             shortcuts=filebrowser.default_shortcuts(project=self.project),
             on_select=do_copy)
@@ -1256,7 +1350,7 @@ class LuaStudioApp(App):
             theme.TEXT_DIM, 12))
         box.add_widget(self._action_btn("Salvar Salvar projeto", self.save_project, popup))
         box.add_widget(self._action_btn("Lsp Exportar como .Lsp", self.export_lsp, popup))
-        box.add_widget(self._action_btn("Imagem Importar arquivo pra Assets",
+        box.add_widget(self._action_btn("Imagem Importar arquivo (Assets/Sound)",
                                         self.open_import_assets, popup))
         box.add_widget(self._action_btn("Arquivo Gerenciar scripts",
                                         self.open_script_manager, popup))
@@ -1596,6 +1690,11 @@ class LuaStudioApp(App):
                     self.log(traceback.format_exc())
 
     def on_resume(self):
+        try:
+            uiguard.lock_android_pan()
+            self._ui_guard.snap()
+        except Exception:
+            pass
         # o Android limpa o modo imersivo ao voltar do segundo plano:
         # reaplica se tem jogo rodando em tela cheia.
         if self.playing and self.project and self.project.screen.get("fullscreen", True):

@@ -45,7 +45,13 @@ except Exception:
 if __name__ == "__main__":
     try:
         from luastudio.player_app import main
-        main()
+        _lsp = None
+        for _i, _a in enumerate(sys.argv[1:], 1):
+            if _a == "--lsp" and _i + 1 < len(sys.argv):
+                _lsp = sys.argv[_i + 1]
+            elif _a.startswith("--lsp="):
+                _lsp = _a.split("=", 1)[1]
+        main(autoload=_lsp)
     except Exception:
         import traceback
         tb = traceback.format_exc()

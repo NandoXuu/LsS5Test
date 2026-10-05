@@ -44,7 +44,11 @@ def default_shortcuts(project=None):
     android_root = "/storage/emulated/0"
     if project is not None and getattr(project, "path", None):
         out.append(("📦 Source", project.path))
-        out.append(("Imagem Source/Assets", os.path.join(project.path, "assets")))
+        from . import pathutil
+        for sub_name, label in (("Assets", "Imagem Source/Assets"),
+                                ("Sound", "Source/Sound")):
+            real = pathutil.find_child_dir(project.path, sub_name)
+            out.append((label, real or os.path.join(project.path, sub_name)))
     if os.path.isdir(android_root):
         out.append(("📱 Armazenamento", android_root))
         download = os.path.join(android_root, "Download")

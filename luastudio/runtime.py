@@ -21,11 +21,14 @@ from .particles import ParticleSystem
 from . import destruction as destruction_mod
 from .profiler import Profiler
 from . import audio_dsp
+from . import pathutil
+from .worldtime import WorldTime
 from . import permissions as perms
 from . import tilemap as tilemap_mod
 from . import http_client
 from . import tts as tts_mod
 from . import input_api
+from . import keynumb as keynumb_mod
 from . import dualsense as dualsense_mod
 from . import dualsense_api
 from .inputs import InputManager
@@ -61,7 +64,7 @@ class Runtime(object):
         self.base_dir = base_dir
         self.scene = Scene(self)
         self.audio = Audio(self.log, base_dir)
-        self.fonts = FontManager(self.resolve, lambda: self.base_dir, self.log)
+        self.fonts = FontManager(self.resolve_asset, lambda: self.base_dir, self.log)
         self.physics = Physics2D(self)
         self.tween = TweenService(self)
         self.particles = ParticleSystem(self)
@@ -70,11 +73,14 @@ class Runtime(object):
         self._timer_seq = 0
         self.interp = Interpreter(print_fn=self.log)
         self.interp.instruction_budget = DEFAULT_INSTRUCTION_BUDGET
+        self.worldtime = WorldTime()   # relogio do mundo x relogio da UI
         self.update_handlers = []
+        self.ui_update_handlers = []
         self.touch_handlers = []
         self.key_handlers = []
         self.pad_button_handlers = []
         self.pad_connect_handlers = []
+        self.typing_probe = lambda: False
         self.start_time = time.time()
         self.stage_size = (800.0, 600.0)
         self.background = (0.06, 0.07, 0.10, 1)
@@ -205,6 +211,67 @@ class Runtime(object):
         app.set("onUpdate", _onupdate)
         g("onUpdate", _onupdate)
 
+        # onUIUpdate(fn(uiDt, uiTime)): roda SEMPRE em tempo real, mesmo com o
+        # mundo pausado/em camera lenta - o lugar certo pra logica de menu.
+        def _onuiupdate(fn=None):
+            if fn is not None:
+                self.ui_update_handlers.append(fn)
+        app.set("onUIUpdate", _onuiupdate)
+        g("onUIUpdate", _onuiupdate)
+
+        # ---- environment / pause (tempo do mundo) ----
+        wt = self.worldtime
+        environment = LuaTable()
+
+        def _env_set_config(cfg=None):
+            if not isinstance(cfg, LuaTable):
+                raise LuaError("environment.setConfig espera uma tabela, ex.: {TimeScale = 0.5}")
+            plain = {}
+            for k, v in cfg.items():
+                plain[k] = v
+            for key in wt.set_config(plain):
+                self.log("[environment] opcao desconhecida: %s (disponivel: TimeScale)" % key)
+        environment.set("setConfig", _env_set_config)
+
+        def _env_get_config(*_a):
+            t = LuaTable()
+            for k, v in wt.get_config().items():
+                t.set(k, v)
+            return t
+        environment.set("getConfig", _env_get_config)
+        environment.set("getTimeScale", lambda *a: float(wt.time_scale))
+        environment.set("worldTime", lambda *a: float(wt.world_time))
+        environment.set("uiTime", lambda *a: float(wt.ui_time))
+        g("environment", environment)
+        g("Environment", environment)
+
+        pause = LuaTable()
+
+        def _pause_world(seconds=None, fn=None):
+            if callable(seconds):
+                seconds, fn = None, seconds
+            wt.pause(seconds, fn)
+        pause.set("world", _pause_world)
+
+        def _pause_resume(*_a):
+            cb = wt.resume()
+            if cb is not None:
+                self.call(cb)
+        pause.set("resume", _pause_resume)
+
+        def _pause_toggle(*_a):
+            if wt.paused:
+                _pause_resume()
+            else:
+                wt.pause()
+            return bool(wt.paused)
+        pause.set("toggle", _pause_toggle)
+        pause.set("isPaused", lambda *a: bool(wt.paused))
+        pause.set("remaining", lambda *a: (float(max(0.0, wt.pause_left))
+                                           if (wt.paused and wt.pause_left is not None) else None))
+        g("pause", pause)
+        g("Pause", pause)
+
         def _ontouch(fn=None):
             if fn is not None:
                 self.touch_handlers.append(fn)
@@ -239,6 +306,9 @@ class Runtime(object):
         input_api.install(self, input_t)
         g("input", input_t)
         g("Input", input_t)
+        keynumb_t = keynumb_mod.install(self)
+        g("keynumb", keynumb_t)
+        g("Keynumb", keynumb_t)
 
         dualsense_t = dualsense_api.install(self)
         g("dualsense", dualsense_t)
@@ -901,20 +971,25 @@ class Runtime(object):
         # ---- Timer (delay / intervalo, sem precisar de loop manual) ----
         timer = LuaTable()
 
-        def _timer_after(seconds=0.0, fn=None):
+        # timer.after(s, fn) / timer.every(s, fn) correm no tempo do MUNDO
+        # (param. extra `true` ou afterUI/everyUI = tempo real, pra menus).
+        def _timer_after(seconds=0.0, fn=None, ui=False):
             self._timer_seq += 1
             handle = float(self._timer_seq)
-            self.timers.append({"id": handle, "t": float(seconds or 0), "every": False, "fn": fn})
+            self.timers.append({"id": handle, "t": float(seconds or 0), "every": False,
+                                "fn": fn, "ui": truthy(ui)})
             return handle
         timer.set("after", _timer_after)
+        timer.set("afterUI", lambda seconds=0.0, fn=None: _timer_after(seconds, fn, True))
 
-        def _timer_every(seconds=0.0, fn=None):
+        def _timer_every(seconds=0.0, fn=None, ui=False):
             self._timer_seq += 1
             handle = float(self._timer_seq)
             self.timers.append({"id": handle, "t": float(seconds or 0), "period": float(seconds or 0),
-                                "every": True, "fn": fn})
+                                "every": True, "fn": fn, "ui": truthy(ui)})
             return handle
         timer.set("every", _timer_every)
+        timer.set("everyUI", lambda seconds=0.0, fn=None: _timer_every(seconds, fn, True))
 
         def _timer_cancel(handle=None):
             self.timers = [t for t in self.timers if t["id"] != handle]
@@ -1094,7 +1169,49 @@ class Runtime(object):
         target = os.path.abspath(os.path.join(base, path))
         if target != base and not target.startswith(base + os.sep):
             return os.path.join(base, "__caminho_bloqueado__")
+        if not os.path.exists(target):
+            # tolera maiusculas/minusculas (assets/ x Assets/)
+            found = pathutil.find_ci(base, path)
+            if found:
+                return os.path.abspath(found)
         return target
+
+    def resolve_asset(self, path):
+        """Como `resolve`, mas pra LER assets (imagem, som, fonte, mapa,
+        shader): se `Source = "assets/Run.png"` nao existir exatamente
+        assim, procura ignorando maiusculas, em Assets/ e Sound/, e por
+        fim pelo nome do arquivo em qualquer pasta do Source. Nunca sai da
+        pasta do Source. Se nao achar, devolve o caminho normal (que nao
+        existe) e avisa UMA vez no log onde procurou."""
+        if not path:
+            return None
+        path = str(path)
+        if os.path.isabs(path):
+            return path
+        direct = self.resolve(path)
+        if os.path.isfile(direct):
+            return direct
+        found = pathutil.find_asset(os.path.abspath(self.base_dir), path)
+        if found:
+            return found
+        warned = self.__dict__.setdefault("_asset_warned", set())
+        if path not in warned:
+            warned.add(path)
+            self.log("[asset] nao encontrei \"%s\" - Source: %s"
+                     % (path, pathutil.describe_source(self.base_dir)))
+        return direct
+
+    def set_base_dir(self, path):
+        """Troca o Source (raiz de onde saem Assets/, Sound/ etc.). Na
+        Engine e a pasta do projeto aberto; no Player e a pasta onde o
+        .Lsp foi aberto."""
+        self.base_dir = path or "."
+        self.__dict__.pop("_asset_warned", None)
+        try:
+            self.audio.base_dir = self.base_dir
+            self.audio.cache.clear()
+        except Exception:
+            pass
 
     # ------------------------------------------------------ modulos (require)
     def require(self, name):
@@ -1142,6 +1259,7 @@ class Runtime(object):
         self.scene_registry = {}
         self.current_scene_name = None
         self.start_time = time.time()
+        self.worldtime.reset()
         self.stop_camera()
         perms.mic_level_stop()
         self.mouse_buttons = set()
@@ -1176,6 +1294,7 @@ class Runtime(object):
         self.particles.reset()
         self.timers = []
         self.update_handlers = []
+        self.ui_update_handlers = []
         self.touch_handlers = []
         self.key_handlers = []
         self.pad_button_handlers = []
@@ -1229,6 +1348,10 @@ class Runtime(object):
         pros outros) via `require(nome)`. Todos compartilham o mesmo
         ambiente Lua, entao podem criar e editar os mesmos objetos."""
         self.project_scripts = dict(scripts or {})
+        try:
+            self.log("[source] " + pathutil.describe_source(self.base_dir))
+        except Exception:
+            pass
         src = self.project_scripts.get(entry)
         if src is None:
             self.reset()
@@ -1348,31 +1471,57 @@ class Runtime(object):
         self.audio.update_live_pitch_all(dt)
 
     def update(self, dt):
+        """Um frame. `dt` e o tempo REAL (relogio da UI). O mundo recebe
+        `wdt` = dt * TimeScale (0 se pausado): fisica, animacoes, tweens,
+        particulas, timers e camera. Input, UI e onUIUpdate seguem em dt."""
         if not self.running:
             return
         dt = safe_dt(dt)
         self._reset_budget()
+        wt = self.worldtime
+        wdt, resume_cb = wt.tick(dt)
         self._safe_step(self.input.drain_native, dt)
-        self._safe_step(self._update_camera2d, dt)
-        self._safe_step(self.physics.step, dt)
-        self._safe_step(self.tween.step, dt)
-        self._safe_step(self.particles.step, dt)
-        self._safe_step(self._step_fragments, dt)
-        self._safe_step(self._step_timers, dt)
-        self._safe_step(self._step_animations, dt)
+        self._safe_step(self.input.tick_flags)
+        if resume_cb is not None:
+            self.call(resume_cb)
+        self._safe_step(self._update_camera2d, wdt)
+        self._safe_step(self._step_physics, wdt)
+        self._safe_step(self.tween.step, wdt, dt)
+        self._safe_step(self.particles.step, wdt, dt)
+        self._safe_step(self._step_fragments, wdt)
+        self._safe_step(self._step_timers, wdt, dt)
+        self._safe_step(self._step_animations, wdt, dt)
         self._safe_step(self._update_audio_hrtf2d, dt)
         self._safe_step(self._update_audio_live_pitch, dt)
         self._safe_step(self._step_http, dt)
         self._safe_step(self._step_tts, dt)
         self._safe_step(self.dualsense.update, dt)
-        t = time.time() - self.start_time
+        # onUpdate: dt/tempo do MUNDO (0 quando pausado - o handler continua
+        # sendo chamado pra poder ler input e despausar); 3o arg = dt real
         for fn in list(self.update_handlers):
-            self.call(fn, float(dt), float(t))
+            self.call(fn, float(wdt), float(wt.world_time), float(dt))
+        # onUIUpdate: sempre em tempo real
+        for fn in list(self.ui_update_handlers):
+            self.call(fn, float(dt), float(wt.ui_time))
         for obj in list(self.scene.objects):
             cb = obj.props.get("OnUpdate")
             if cb is not None:
-                self.call(cb, obj, float(dt), float(t))
+                if wt.is_ui(obj):
+                    self.call(cb, obj, float(dt), float(wt.ui_time))
+                else:
+                    self.call(cb, obj, float(wdt), float(wt.world_time))
         self.input.end_frame()
+
+    def _step_physics(self, wdt):
+        """Fisica no tempo do mundo. Se TimeScale for alto, divide em
+        sub-passos (a fisica limita cada passo a 1/20 s, senao a camera
+        rapida viraria camera 'travando')."""
+        if wdt <= 0:
+            return
+        n = min(8, max(1, int(math.ceil(wdt / (1.0 / 30.0)))))
+        sub = wdt / n
+        for _ in range(n):
+            self.physics.step(sub)
 
     def _safe_step(self, fn, *args):
         """Roda uma etapa interna do frame (fisica/tween/particulas/...)
@@ -1404,12 +1553,14 @@ class Runtime(object):
             if lifetime > 0 and age >= lifetime:
                 self.scene.remove(obj)
 
-    def _step_timers(self, dt):
+    def _step_timers(self, dt, ui_dt=None):
         if not self.timers:
             return
+        if ui_dt is None:
+            ui_dt = dt
         due, keep = [], []
         for item in self.timers:
-            item["t"] -= dt
+            item["t"] -= (ui_dt if item.get("ui") else dt)
             if item["t"] <= 0:
                 due.append(item)
                 if item.get("every"):
@@ -1422,9 +1573,15 @@ class Runtime(object):
             if item["fn"] is not None:
                 self.call(item["fn"])
 
-    def _step_animations(self, dt):
+    def _step_animations(self, dt, ui_dt=None):
+        wt = self.worldtime
+        if ui_dt is None:
+            ui_dt = dt
         for obj in self.scene.objects:
             if obj.cls != "image" or not obj.alive:
+                continue
+            odt = ui_dt if wt.is_ui(obj) else dt
+            if odt <= 0:
                 continue
             speed = float(obj.props.get("FrameSpeed") or 0)
             if speed == 0 or not truthy(obj.props.get("Playing", True)):
@@ -1433,7 +1590,7 @@ class Runtime(object):
             total = cols * rows
             if total <= 1:
                 continue
-            frame = float(obj.props.get("Frame") or 0) + speed * dt
+            frame = float(obj.props.get("Frame") or 0) + speed * odt
             if frame >= total:
                 if truthy(obj.props.get("Loop", True)):
                     frame = frame % total

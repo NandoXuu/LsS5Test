@@ -70,7 +70,14 @@ class Audio(object):
         if os.path.isabs(source) and os.path.exists(source):
             return source
         p = os.path.join(self.base_dir, source)
-        return p if os.path.exists(p) else None
+        if os.path.exists(p):
+            return p
+        from . import pathutil
+        found = pathutil.find_asset(os.path.abspath(self.base_dir), source)
+        if not found:
+            self.log("[audio] nao encontrei \"%s\" - Source: %s"
+                     % (source, pathutil.describe_source(self.base_dir)))
+        return found
 
     def load(self, source):
         mixer = self.mixer

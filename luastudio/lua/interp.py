@@ -201,14 +201,20 @@ def lua_type(v):
     if isinstance(v, str):
         return "string"
     if isinstance(v, LuaTable):
-        return "table"
+        return "boolean" if hasattr(v, "lua_value") else "table"
     if callable(v):
         return "function"
     return "userdata"
 
 
 def truthy(v):
-    return not (v is None or v is False)
+    if v is None or v is False:
+        return False
+    if isinstance(v, LuaTable):
+        live = getattr(v, "lua_value", None)
+        if live is not None:
+            return bool(live())
+    return True
 
 
 def tostring(v):
@@ -228,6 +234,8 @@ def tostring(v):
         return ("%.14g" % v)
     if isinstance(v, str):
         return v
+    if isinstance(v, LuaTable) and hasattr(v, "lua_value"):
+        return "true" if v.lua_value() else "false"
     return repr(v)
 
 
@@ -611,6 +619,10 @@ class Interpreter(object):
 
     @staticmethod
     def eq(a, b):
+        if isinstance(b, bool) and hasattr(a, "lua_value"):
+            a = bool(a.lua_value())
+        elif isinstance(a, bool) and hasattr(b, "lua_value"):
+            b = bool(b.lua_value())
         if isinstance(a, bool) or isinstance(b, bool):
             return a is b
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
