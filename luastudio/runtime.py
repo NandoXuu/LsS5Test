@@ -12,6 +12,7 @@ import threading
 from .lua import (Interpreter, LuaTable, LuaError, LuaSyntaxError, tostring, truthy,
                   as_list, first, from_py, to_py)
 from .api import Scene, CreateRoot, Instance, vec_table, to_vec, to_color, safe_float
+from .prefab import PrefabManager, InstanceRoot
 from .vector import Vector2, Vector3, VECTOR2, VECTOR3
 from .audio import Audio
 from .fonts import FontManager
@@ -91,6 +92,7 @@ class Runtime(object):
         self.running = False
         self.scene_registry = {}   # nome -> funcao Lua que monta a cena
         self.current_scene_name = None
+        self.prefabs = PrefabManager(self)   # scene.instantiate / Instance.<Cena>
         self._fade_overlay = None
         self.camera_widget = None       # kivy.uix.camera.Camera ao vivo (create.image Source="camera")
         self.mouse_pos = (0.0, 0.0)     # ultima posicao do mouse/toque, coords Lua (Y pra baixo)
@@ -1007,8 +1009,13 @@ class Runtime(object):
         scenes_t.set("current", lambda *a: self.current_scene_name)
         scenes_t.set("has", lambda name=None: tostring(name) in self.scene_registry)
         scenes_t.set("load", lambda name=None, fade=0.0: self.load_scene(name, fade))
+        # instanciar outras cenas (arquivos .lua que devolvem { Objects = {...} })
+        scenes_t.set("instantiate", lambda name=None, overrides=None: self.prefabs.instantiate(name, overrides))
+        scenes_t.set("instances", lambda *a: LuaTable(list(self.prefabs.live)))
         g("Scenes", scenes_t)
         g("scenes", scenes_t)
+        g("scene", scenes_t)
+        g("Instance", InstanceRoot(self.prefabs))
 
         # ---- Random (nomes "de jogo", alem do math.random padrao) ----
         rnd = LuaTable()
@@ -1268,6 +1275,7 @@ class Runtime(object):
         self.hover_obj = None
         self._modules = {}
         self._loading_stack = set()
+        self.prefabs.reset()
         self.layer_state = {}
         self.postfx = None
         with self._http_lock:
@@ -1289,6 +1297,7 @@ class Runtime(object):
         continuam existindo) - usado pelo Scenes.load entre uma cena e outra."""
         self.audio.stop_all()
         self.scene.clear()
+        self.prefabs.live = []
         self.physics.reset()
         self.tween.reset()
         self.particles.reset()
